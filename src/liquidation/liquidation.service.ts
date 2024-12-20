@@ -1,12 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Position } from '../entities/position.entity';
+import { Position, PositionStatus } from '../entities/position.entity';
 import { PriceService } from '../price/price.service';
 import { TradeService } from '../trade/trade.service';
-import { UserService } from '../user/user.service';
+import { MarginService } from '../margin/margin.service';
 import { MathService } from '../utils/math.service';
-import { OrderSide, OrderType, MarginType } from '../types/trade.types';
+import { OrderSide, MarginType } from '../types/trade.types';
 
 @Injectable()
 export class LiquidationService {
@@ -23,7 +23,7 @@ export class LiquidationService {
     private readonly positionRepository: Repository<Position>,
     private readonly priceService: PriceService,
     private readonly tradeService: TradeService,
-    private readonly userService: UserService,
+    private readonly marginService: MarginService,
     private readonly mathService: MathService,
   ) {
     this.startMonitoring();
@@ -116,7 +116,9 @@ export class LiquidationService {
   }
 
   private async checkPositionsForLiquidation(): Promise<void> {
-    const positions = await this.positionRepository.find();
+    const positions = await this.positionRepository.find({
+      where: { status: PositionStatus.OPEN },
+    });
 
     for (const position of positions) {
       try {
@@ -144,7 +146,30 @@ export class LiquidationService {
     currentPrice: string,
   ): Promise<void> {
     try {
-      await this.tradeService.closePosition(position.id, OrderType.LIQUIDATION);
+      // Calculate realized PnL
+      const realizedPnl = this.calculatePnl(
+        position.side,
+        position.size,
+        position.entryPrice,
+        currentPrice,
+      );
+
+      // Release margin with PnL (which will be negative in liquidation case)
+      await this.marginService.releaseMargin(
+        position.userId,
+        position.token,
+        position.id,
+        realizedPnl,
+      );
+
+      // Update position status
+      await this.positionRepository.update(position.id, {
+        status: PositionStatus.LIQUIDATED,
+        closedAt: new Date(),
+        closingPrice: currentPrice,
+        realizedPnl,
+      });
+
       this.logger.log(
         `Position ${position.id} liquidated at price ${currentPrice}`,
       );
@@ -154,8 +179,24 @@ export class LiquidationService {
     }
   }
 
+  private calculatePnl(
+    side: OrderSide,
+    size: string,
+    entryPrice: string,
+    currentPrice: string,
+  ): string {
+    const priceDiff =
+      side === OrderSide.LONG
+        ? this.mathService.subtract(currentPrice, entryPrice)
+        : this.mathService.subtract(entryPrice, currentPrice);
+
+    return this.mathService.multiply(size, priceDiff);
+  }
+
   private async updateBorrowingFees(): Promise<void> {
-    const positions = await this.positionRepository.find();
+    const positions = await this.positionRepository.find({
+      where: { status: PositionStatus.OPEN },
+    });
     const now = new Date();
 
     for (const position of positions) {

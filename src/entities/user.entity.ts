@@ -9,6 +9,8 @@ import {
 import { Position } from './position.entity';
 import { MarginLock } from './margin-lock.entity';
 import { LPPosition } from './lp-position.entity';
+import { MarginBalance } from '../margin/entities/margin-balance.entity';
+import { LimitOrder } from './limit-order.entity';
 
 @Entity('users')
 export class User {
@@ -18,18 +20,6 @@ export class User {
   @Column({ unique: true })
   publicKey: string;
 
-  @Column({ type: 'decimal', precision: 40, scale: 20, default: '0' })
-  availableBalance: string;
-
-  @Column({ type: 'decimal', precision: 40, scale: 20, default: '0' })
-  totalBalance: string;
-
-  @Column({ type: 'decimal', precision: 40, scale: 20, default: '0' })
-  lockedMargin: string;
-
-  @Column({ type: 'decimal', precision: 40, scale: 20, default: '0' })
-  unrealizedPnl: string;
-
   @OneToMany(() => Position, (position) => position.user)
   positions: Position[];
 
@@ -38,6 +28,12 @@ export class User {
 
   @OneToMany(() => LPPosition, (lpPosition) => lpPosition.user)
   lpPositions: LPPosition[];
+
+  @OneToMany(() => MarginBalance, (marginBalance) => marginBalance.user)
+  marginBalances: MarginBalance[];
+
+  @OneToMany(() => LimitOrder, (limitOrder) => limitOrder.user)
+  limitOrders: LimitOrder[];
 
   @CreateDateColumn()
   createdAt: Date;

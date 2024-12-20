@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Not, Repository, Between } from 'typeorm';
-import { Position } from '../entities/position.entity';
+import { IsNull, Not, Repository } from 'typeorm';
+import { Position, PositionStatus } from '../entities/position.entity';
 import { PriceService } from '../price/price.service';
 import { LiquidityService } from '../liquidity/liquidity.service';
 import { UserService } from '../user/user.service';
@@ -18,6 +18,7 @@ import {
   PartialCloseRequest,
 } from '../types/trade.types';
 import { Trade as TradeEntity } from '../entities/trade.entity';
+import { MarginService } from '../margin/margin.service';
 
 /**
  * This module will be responsible for handling all trade-related functionality.
@@ -47,6 +48,7 @@ export class TradeService {
     private readonly userService: UserService,
     private readonly mathService: MathService,
     private readonly cacheService: CacheService,
+    private readonly marginService: MarginService,
   ) {
     this.startMonitoring();
   }
@@ -63,10 +65,16 @@ export class TradeService {
 
   async openPosition(orderRequest: OrderRequest): Promise<Position> {
     // 1. Validate user has enough margin
-    const userBalance = await this.userService.getBalance(orderRequest.userId);
+    const marginBalance = await this.marginService.getBalance(
+      orderRequest.userId,
+      orderRequest.token,
+    );
     const requiredMargin = this.calculateRequiredMargin(orderRequest);
 
-    if (this.mathService.compare(userBalance, requiredMargin) < 0) {
+    if (
+      this.mathService.compare(marginBalance.availableBalance, requiredMargin) <
+      0
+    ) {
       throw new Error('Insufficient margin');
     }
 
@@ -79,7 +87,15 @@ export class TradeService {
     );
     const entryPrice = this.calculateEntryPrice(marketPrice, orderRequest);
 
-    // 4. Create position
+    // 4. Lock margin for the trade
+    await this.marginService.lockMargin(
+      orderRequest.userId,
+      orderRequest.token,
+      requiredMargin,
+      orderRequest.id,
+    );
+
+    // 5. Create position
     const position = await this.positionRepository.save(
       this.positionRepository.create({
         userId: orderRequest.userId,
@@ -93,27 +109,9 @@ export class TradeService {
         takeProfitPrice: orderRequest.takeProfitPrice,
         unrealizedPnl: '0',
         margin: requiredMargin,
+        token: orderRequest.token,
       }),
     );
-
-    // 5. Record trade
-    await this.recordTrade({
-      id: crypto.randomUUID(),
-      positionId: position.id,
-      userId: orderRequest.userId,
-      marketId: orderRequest.marketId,
-      side: orderRequest.side,
-      size: orderRequest.size,
-      price: entryPrice,
-      leverage: orderRequest.leverage,
-      marginType: orderRequest.marginType,
-      fee: this.calculateFee(orderRequest.size, entryPrice),
-      createdAt: new Date(),
-      type: OrderType.MARKET,
-    });
-
-    // 6. Lock margin
-    await this.userService.lockMargin(orderRequest.userId, requiredMargin);
 
     return position;
   }
@@ -156,7 +154,6 @@ export class TradeService {
       where: [
         { stopLossPrice: Not(IsNull()) },
         { takeProfitPrice: Not(IsNull()) },
-        { trailingStopDistance: Not(IsNull()) },
       ],
     });
 
@@ -166,18 +163,13 @@ export class TradeService {
           position.marketId,
         );
 
-        // Update highest/lowest prices for trailing stops
-        if (position.trailingStopDistance) {
-          await this.updateTrailingStop(position, currentPrice);
-        }
-
         if (this.shouldTriggerStopLoss(position, currentPrice)) {
-          await this.closePosition(position.id, OrderType.STOP_LOSS);
+          await this.closePosition(position.id, position.userId);
           continue;
         }
 
         if (this.shouldTriggerTakeProfit(position, currentPrice)) {
-          await this.closePosition(position.id, OrderType.TAKE_PROFIT);
+          await this.closePosition(position.id, position.userId);
         }
       } catch (error) {
         console.error(`Error processing position ${position.id}:`, error);
@@ -298,16 +290,18 @@ export class TradeService {
     }
   }
 
-  async closePosition(
-    positionId: string,
-    type: OrderType = OrderType.MARKET,
-  ): Promise<void> {
+  async closePosition(positionId: string, userId: string): Promise<void> {
     const position = await this.getPosition(positionId);
+
+    if (position.userId !== userId) {
+      throw new Error('Not authorized to modify this position');
+    }
+
     const currentPrice = await this.priceService.getCurrentPrice(
       position.marketId,
     );
 
-    // Calculate PnL
+    // Calculate final PnL
     const realizedPnl = this.calculatePnl(
       position.side,
       position.size,
@@ -315,29 +309,21 @@ export class TradeService {
       currentPrice,
     );
 
-    // Record closing trade
-    await this.recordTrade({
-      id: crypto.randomUUID(),
-      positionId: position.id,
-      userId: position.userId,
-      marketId: position.marketId,
-      side: position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
-      size: position.size,
-      price: currentPrice,
-      leverage: position.leverage,
-      marginType: position.marginType,
+    // Release margin with PnL
+    await this.marginService.releaseMargin(
+      position.userId,
+      position.token,
+      position.id,
       realizedPnl,
-      fee: this.calculateFee(position.size, currentPrice),
-      createdAt: new Date(),
-      type,
+    );
+
+    // Close position
+    await this.positionRepository.update(position.id, {
+      status: PositionStatus.CLOSED,
+      closedAt: new Date(),
+      closingPrice: currentPrice,
+      realizedPnl,
     });
-
-    // Release margin
-    await this.userService.releaseMargin(position.userId, position.id);
-
-    // Delete position
-    await this.positionRepository.delete(position.id);
-    await this.invalidatePositionCache(positionId, position.userId);
   }
 
   async updatePositionPnl(positionId: string): Promise<void> {
@@ -354,7 +340,11 @@ export class TradeService {
     );
 
     await this.positionRepository.update(position.id, { unrealizedPnl });
-    await this.userService.updateUnrealizedPnl(position.userId, unrealizedPnl);
+    await this.marginService.updateUnrealizedPnl(
+      position.userId,
+      position.token,
+      unrealizedPnl,
+    );
   }
 
   async getPosition(positionId: string): Promise<Position> {
@@ -494,6 +484,27 @@ export class TradeService {
       request.price || currentPrice,
     );
 
+    // Release proportional margin with PnL
+    const marginToRelease = this.mathService.multiply(
+      position.margin,
+      this.mathService.divide(request.size, position.size),
+    );
+    await this.marginService.releaseMargin(
+      position.userId,
+      position.token,
+      position.id,
+      realizedPnl,
+    );
+
+    // Update position
+    const updatedPosition = await this.positionRepository.save({
+      ...position,
+      size: remainingSize,
+      margin: this.mathService.subtract(position.margin, marginToRelease),
+      stopLossPrice: request.stopLossPrice || position.stopLossPrice,
+      takeProfitPrice: request.takeProfitPrice || position.takeProfitPrice,
+    });
+
     // Record the partial close trade
     await this.recordTrade({
       id: crypto.randomUUID(),
@@ -511,31 +522,6 @@ export class TradeService {
       type: request.type,
       isPartialClose: true,
     });
-
-    // Calculate new margin amount proportionally
-    const newMargin = this.mathService.multiply(
-      position.margin,
-      this.mathService.divide(remainingSize, position.size),
-    );
-
-    // Release proportional margin
-    const marginToRelease = this.mathService.subtract(
-      position.margin,
-      newMargin,
-    );
-    await this.userService.releaseMargin(position.userId, position.id);
-
-    // Update position
-    const updatedPosition = await this.positionRepository.save({
-      ...position,
-      size: remainingSize,
-      margin: newMargin,
-      stopLossPrice: request.stopLossPrice,
-      takeProfitPrice: request.takeProfitPrice,
-    });
-
-    // Lock new margin amount
-    await this.userService.lockMargin(position.userId, newMargin);
 
     return updatedPosition;
   }

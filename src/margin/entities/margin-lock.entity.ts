@@ -1,13 +1,11 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
   Column,
-  ManyToOne,
-  JoinColumn,
+  PrimaryGeneratedColumn,
   CreateDateColumn,
+  UpdateDateColumn,
 } from 'typeorm';
-import { User } from './user.entity';
-import { TokenType } from '../margin/types/token.types';
+import { TokenType } from '../types/token.types';
 
 @Entity('margin_locks')
 export class MarginLock {
@@ -16,10 +14,6 @@ export class MarginLock {
 
   @Column({ type: 'uuid' })
   userId: string;
-
-  @ManyToOne(() => User, (user) => user.marginLocks)
-  @JoinColumn({ name: 'userId' })
-  user: User;
 
   @Column({ type: 'uuid' })
   tradeId: string;
@@ -35,4 +29,7 @@ export class MarginLock {
 
   @CreateDateColumn()
   createdAt: Date;
+
+  @UpdateDateColumn()
+  updatedAt: Date;
 }

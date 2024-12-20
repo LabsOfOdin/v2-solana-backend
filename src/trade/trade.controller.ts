@@ -54,7 +54,7 @@ export class TradeController {
 
   @Delete('position/:positionId')
   async closePosition(@Param('positionId') positionId: string, @Request() req) {
-    return this.tradeService.closePosition(positionId);
+    return this.tradeService.closePosition(positionId, req.user.id);
   }
 
   @Get('position/:positionId/borrowing-history')

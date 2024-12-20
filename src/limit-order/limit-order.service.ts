@@ -4,9 +4,14 @@ import { Repository } from 'typeorm';
 import { LimitOrder } from '../entities/limit-order.entity';
 import { PriceService } from '../price/price.service';
 import { TradeService } from '../trade/trade.service';
-import { UserService } from '../user/user.service';
+import { MarginService } from '../margin/margin.service';
 import { MathService } from '../utils/math.service';
-import { OrderRequest, OrderStatus, OrderType } from '../types/trade.types';
+import {
+  OrderRequest,
+  OrderStatus,
+  OrderType,
+  OrderSide,
+} from '../types/trade.types';
 
 @Injectable()
 export class LimitOrderService {
@@ -18,7 +23,7 @@ export class LimitOrderService {
     private readonly limitOrderRepository: Repository<LimitOrder>,
     private readonly priceService: PriceService,
     private readonly tradeService: TradeService,
-    private readonly userService: UserService,
+    private readonly marginService: MarginService,
     private readonly mathService: MathService,
   ) {
     // Start monitoring limit orders
@@ -47,13 +52,25 @@ export class LimitOrderService {
     );
 
     // Validate user has enough balance
-    const userBalance = await this.userService.getBalance(orderRequest.userId);
-    if (this.mathService.compare(userBalance, requiredMargin) < 0) {
+    const marginBalance = await this.marginService.getBalance(
+      orderRequest.userId,
+      orderRequest.token,
+    );
+
+    if (
+      this.mathService.compare(marginBalance.availableBalance, requiredMargin) <
+      0
+    ) {
       throw new Error('Insufficient balance for limit order');
     }
 
     // Lock the margin
-    await this.userService.lockMargin(orderRequest.userId, requiredMargin);
+    await this.marginService.lockMargin(
+      orderRequest.userId,
+      orderRequest.token,
+      requiredMargin,
+      orderRequest.id,
+    );
 
     // Create limit order
     const limitOrder = this.limitOrderRepository.create({
@@ -64,6 +81,7 @@ export class LimitOrderService {
       price: orderRequest.price,
       leverage: orderRequest.leverage,
       marginType: orderRequest.marginType,
+      token: orderRequest.token,
       requiredMargin,
       status: OrderStatus.OPEN,
     });
@@ -85,7 +103,12 @@ export class LimitOrderService {
     }
 
     // Release locked margin
-    await this.userService.releaseMargin(userId, orderId);
+    await this.marginService.releaseMargin(
+      userId,
+      order.token,
+      orderId,
+      '0', // No PnL for cancelled orders
+    );
 
     // Update order status
     await this.limitOrderRepository.update(orderId, {
@@ -120,20 +143,21 @@ export class LimitOrderService {
   }
 
   private shouldExecuteOrder(
-    side: string,
+    side: OrderSide,
     limitPrice: string,
     currentPrice: string,
   ): boolean {
     const comparison = this.mathService.compare(currentPrice, limitPrice);
     return (
-      (side === 'LONG' && comparison <= 0) || // Buy when price falls to or below limit
-      (side === 'SHORT' && comparison >= 0) // Sell when price rises to or above limit
+      (side === OrderSide.LONG && comparison <= 0) || // Buy when price falls to or below limit
+      (side === OrderSide.SHORT && comparison >= 0) // Sell when price rises to or above limit
     );
   }
 
   private async executeLimitOrder(order: LimitOrder): Promise<void> {
     // Create order request
     const orderRequest: OrderRequest = {
+      id: order.id,
       userId: order.userId,
       marketId: order.marketId,
       side: order.side,
@@ -142,6 +166,7 @@ export class LimitOrderService {
       price: order.price,
       leverage: order.leverage,
       marginType: order.marginType,
+      token: order.token,
     };
 
     try {

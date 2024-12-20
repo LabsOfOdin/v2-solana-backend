@@ -8,48 +8,60 @@ import {
   JoinColumn,
 } from 'typeorm';
 import { User } from './user.entity';
-import { Market } from './market.entity';
 import { OrderSide, MarginType, OrderStatus } from '../types/trade.types';
+import { TokenType } from '../margin/types/token.types';
 
 @Entity('limit_orders')
 export class LimitOrder {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column()
+  @Column({ type: 'uuid' })
   userId: string;
 
-  @ManyToOne(() => User)
+  @ManyToOne(() => User, (user) => user.limitOrders)
   @JoinColumn({ name: 'userId' })
   user: User;
 
-  @Column()
+  @Column({ type: 'uuid' })
   marketId: string;
 
-  @ManyToOne(() => Market)
-  @JoinColumn({ name: 'marketId' })
-  market: Market;
-
-  @Column({ type: 'enum', enum: OrderSide })
+  @Column({
+    type: 'enum',
+    enum: OrderSide,
+  })
   side: OrderSide;
 
-  @Column({ type: 'decimal', precision: 40, scale: 20 })
+  @Column({ type: 'decimal', precision: 40, scale: 18 })
   size: string;
 
-  @Column({ type: 'decimal', precision: 40, scale: 20 })
+  @Column({ type: 'decimal', precision: 40, scale: 18 })
   price: string;
 
-  @Column({ type: 'decimal', precision: 40, scale: 20 })
+  @Column({ type: 'decimal', precision: 10, scale: 2 })
   leverage: string;
 
-  @Column({ type: 'enum', enum: MarginType })
+  @Column({
+    type: 'enum',
+    enum: MarginType,
+  })
   marginType: MarginType;
 
-  @Column({ type: 'enum', enum: OrderStatus, default: OrderStatus.OPEN })
-  status: OrderStatus;
+  @Column({
+    type: 'enum',
+    enum: TokenType,
+  })
+  token: TokenType;
 
-  @Column({ type: 'decimal', precision: 40, scale: 20 })
+  @Column({ type: 'decimal', precision: 40, scale: 18 })
   requiredMargin: string;
+
+  @Column({
+    type: 'enum',
+    enum: OrderStatus,
+    default: OrderStatus.OPEN,
+  })
+  status: OrderStatus;
 
   @CreateDateColumn()
   createdAt: Date;

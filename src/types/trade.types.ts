@@ -1,10 +1,10 @@
+import { TokenType } from '../margin/types/token.types';
+
 export enum OrderType {
   MARKET = 'MARKET',
   LIMIT = 'LIMIT',
-  STOP_LOSS = 'STOP_LOSS',
-  TAKE_PROFIT = 'TAKE_PROFIT',
-  TRAILING_STOP = 'TRAILING_STOP',
-  LIQUIDATION = 'LIQUIDATION',
+  STOP_MARKET = 'STOP_MARKET',
+  TAKE_PROFIT_MARKET = 'TAKE_PROFIT_MARKET',
 }
 
 export enum OrderSide {
@@ -26,19 +26,18 @@ export enum OrderStatus {
 }
 
 export interface OrderRequest {
+  id: string;
   userId: string;
   marketId: string;
   side: OrderSide;
-  size: string;
   type: OrderType;
+  size: string;
   price?: string;
   leverage: string;
   marginType: MarginType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
-  trailingStopDistance?: string;
-  partialSize?: string;
-  isReduceOnly?: boolean;
+  token: TokenType;
 }
 
 export interface UpdatePositionRequest {
@@ -53,27 +52,6 @@ export interface PartialCloseRequest {
   type: OrderType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
-}
-
-export interface Position {
-  id: string;
-  userId: string;
-  marketId: string;
-  side: OrderSide;
-  size: string;
-  entryPrice: string;
-  leverage: string;
-  marginType: MarginType;
-  liquidationPrice: string;
-  stopLossPrice?: string;
-  takeProfitPrice?: string;
-  trailingStopDistance?: string;
-  highestPrice?: string;
-  lowestPrice?: string;
-  unrealizedPnl: string;
-  margin: string;
-  createdAt: Date;
-  updatedAt: Date;
 }
 
 export interface Trade {
