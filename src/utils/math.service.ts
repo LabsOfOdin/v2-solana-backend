@@ -137,4 +137,15 @@ export class MathService {
       ? decimalA.toString()
       : decimalB.toString();
   }
+
+  /**
+   * Returns the maximum of two numbers
+   */
+  max(a: number | string, b: number | string): string {
+    const decimalA = new Decimal(a);
+    const decimalB = new Decimal(b);
+    return decimalA.greaterThan(decimalB)
+      ? decimalA.toString()
+      : decimalB.toString();
+  }
 }

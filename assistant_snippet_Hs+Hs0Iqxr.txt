@@ -1,0 +1,23 @@
+1|POST /trades/position
+2|{
+3|  "marketId": "market-uuid",
+4|  "side": "LONG",
+5|  "size": "1.0",
+6|  "type": "MARKET",
+7|  "leverage": "10",
+8|  "marginType": "ISOLATED",
+9|  "trailingStopDistance": "1000"
+10|}
+
+1|PUT /trades/position/:positionId
+2|{
+3|  "trailingStopDistance": "1000"
+4|}
+
+1|POST /trades/position/:positionId/partial-close
+2|{
+3|  "size": "0.5",
+4|  "type": "MARKET",
+5|  "stopLossPrice": "45000",
+6|  "takeProfitPrice": "55000"
+7|} 

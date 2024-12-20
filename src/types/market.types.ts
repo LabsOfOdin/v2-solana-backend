@@ -49,3 +49,18 @@ export interface MarketInfo {
   volume24h?: string;
   openInterest?: string;
 }
+
+export interface MarketStats {
+  price: string;
+  priceChange24h: string;
+  volume24h: string;
+  openInterest: string;
+  fundingRate: string;
+  nextFundingTime: Date;
+  markPrice: string;
+  indexPrice: string;
+  maxLeverage: string;
+  liquidationFee: string;
+  tradingFee: string;
+  borrowingRate: string;
+}

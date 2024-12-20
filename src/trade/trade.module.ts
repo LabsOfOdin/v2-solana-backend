@@ -6,7 +6,7 @@ import { Trade } from '../entities/trade.entity';
 import { UserModule } from '../user/user.module';
 import { LiquidityModule } from '../liquidity/liquidity.module';
 import { PriceModule } from '../price/price.module';
-import { MathService } from '../utils/math.service';
+import { UtilsModule } from '../utils/utils.module';
 
 @Module({
   imports: [
@@ -14,8 +14,9 @@ import { MathService } from '../utils/math.service';
     UserModule,
     LiquidityModule,
     PriceModule,
+    UtilsModule,
   ],
-  providers: [TradeService, MathService],
+  providers: [TradeService],
   exports: [TradeService],
 })
 export class TradeModule {}

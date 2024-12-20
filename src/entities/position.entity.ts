@@ -45,14 +45,38 @@ export class Position {
   @Column({ type: 'enum', enum: MarginType })
   marginType: MarginType;
 
-  @Column({ type: 'decimal', precision: 40, scale: 20 })
-  liquidationPrice: string;
+  @Column({ type: 'decimal', precision: 40, scale: 20, nullable: true })
+  stopLossPrice?: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 20, nullable: true })
+  takeProfitPrice?: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 20, nullable: true })
+  trailingStopDistance?: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 20, nullable: true })
+  highestPrice?: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 20, nullable: true })
+  lowestPrice?: string;
 
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   unrealizedPnl: string;
 
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   margin: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 20, default: '0' })
+  accumulatedFunding: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 20, default: '0' })
+  accumulatedBorrowingFee: string;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastBorrowingFeeUpdate: Date;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastFundingUpdate: Date;
 
   @CreateDateColumn()
   createdAt: Date;

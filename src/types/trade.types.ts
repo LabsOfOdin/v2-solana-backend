@@ -1,6 +1,10 @@
 export enum OrderType {
   MARKET = 'MARKET',
   LIMIT = 'LIMIT',
+  STOP_LOSS = 'STOP_LOSS',
+  TAKE_PROFIT = 'TAKE_PROFIT',
+  TRAILING_STOP = 'TRAILING_STOP',
+  LIQUIDATION = 'LIQUIDATION',
 }
 
 export enum OrderSide {
@@ -13,6 +17,14 @@ export enum MarginType {
   CROSS = 'CROSS',
 }
 
+export enum OrderStatus {
+  OPEN = 'OPEN',
+  FILLED = 'FILLED',
+  CANCELLED = 'CANCELLED',
+  EXPIRED = 'EXPIRED',
+  PARTIALLY_FILLED = 'PARTIALLY_FILLED',
+}
+
 export interface OrderRequest {
   userId: string;
   marketId: string;
@@ -22,6 +34,25 @@ export interface OrderRequest {
   price?: string;
   leverage: string;
   marginType: MarginType;
+  stopLossPrice?: string;
+  takeProfitPrice?: string;
+  trailingStopDistance?: string;
+  partialSize?: string;
+  isReduceOnly?: boolean;
+}
+
+export interface UpdatePositionRequest {
+  stopLossPrice?: string;
+  takeProfitPrice?: string;
+  trailingStopDistance?: string;
+}
+
+export interface PartialCloseRequest {
+  size: string;
+  price?: string;
+  type: OrderType;
+  stopLossPrice?: string;
+  takeProfitPrice?: string;
 }
 
 export interface Position {
@@ -34,6 +65,11 @@ export interface Position {
   leverage: string;
   marginType: MarginType;
   liquidationPrice: string;
+  stopLossPrice?: string;
+  takeProfitPrice?: string;
+  trailingStopDistance?: string;
+  highestPrice?: string;
+  lowestPrice?: string;
   unrealizedPnl: string;
   margin: string;
   createdAt: Date;
@@ -53,4 +89,6 @@ export interface Trade {
   realizedPnl?: string;
   fee: string;
   createdAt: Date;
+  type: OrderType;
+  isPartialClose?: boolean;
 }

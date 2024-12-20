@@ -53,6 +53,10 @@ export class CreateInitialSchema1707000000000 implements MigrationInterface {
       CREATE TYPE "public"."margin_type_enum" AS ENUM('ISOLATED', 'CROSS')
     `);
 
+    await queryRunner.query(`
+      CREATE TYPE "public"."order_status_enum" AS ENUM('OPEN', 'FILLED', 'CANCELLED', 'EXPIRED')
+    `);
+
     // Positions table
     await queryRunner.query(`
       CREATE TABLE "positions" (
@@ -65,8 +69,31 @@ export class CreateInitialSchema1707000000000 implements MigrationInterface {
         "leverage" decimal(40,20) NOT NULL,
         "marginType" "public"."margin_type_enum" NOT NULL,
         "liquidationPrice" decimal(40,20) NOT NULL,
+        "stopLossPrice" decimal(40,20),
+        "takeProfitPrice" decimal(40,20),
+        "trailingStopDistance" decimal(40,20),
+        "highestPrice" decimal(40,20),
+        "lowestPrice" decimal(40,20),
         "unrealizedPnl" decimal(40,20) NOT NULL,
         "margin" decimal(40,20) NOT NULL,
+        "createdAt" TIMESTAMP NOT NULL DEFAULT now(),
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT now()
+      )
+    `);
+
+    // Limit Orders table
+    await queryRunner.query(`
+      CREATE TABLE "limit_orders" (
+        "id" uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+        "userId" uuid NOT NULL REFERENCES "users"("id"),
+        "marketId" uuid NOT NULL REFERENCES "markets"("id"),
+        "side" "public"."order_side_enum" NOT NULL,
+        "size" decimal(40,20) NOT NULL,
+        "price" decimal(40,20) NOT NULL,
+        "leverage" decimal(40,20) NOT NULL,
+        "marginType" "public"."margin_type_enum" NOT NULL,
+        "status" "public"."order_status_enum" NOT NULL DEFAULT 'OPEN',
+        "requiredMargin" decimal(40,20) NOT NULL,
         "createdAt" TIMESTAMP NOT NULL DEFAULT now(),
         "updatedAt" TIMESTAMP NOT NULL DEFAULT now()
       )
@@ -134,11 +161,13 @@ export class CreateInitialSchema1707000000000 implements MigrationInterface {
     await queryRunner.query(`DROP TABLE "lp_positions"`);
     await queryRunner.query(`DROP TABLE "liquidity_pools"`);
     await queryRunner.query(`DROP TABLE "trades"`);
+    await queryRunner.query(`DROP TABLE "limit_orders"`);
     await queryRunner.query(`DROP TABLE "positions"`);
     await queryRunner.query(`DROP TABLE "markets"`);
     await queryRunner.query(`DROP TABLE "users"`);
     await queryRunner.query(`DROP TYPE "public"."market_status_enum"`);
     await queryRunner.query(`DROP TYPE "public"."order_side_enum"`);
     await queryRunner.query(`DROP TYPE "public"."margin_type_enum"`);
+    await queryRunner.query(`DROP TYPE "public"."order_status_enum"`);
   }
 }
