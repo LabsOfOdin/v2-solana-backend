@@ -51,7 +51,6 @@ export class MarginController {
       publicKey: string;
       amount: string;
       token: TokenType;
-      destinationAddress: string;
     },
   ) {
     const user = await this.userService.getUserByPublicKey(body.publicKey);
@@ -65,7 +64,7 @@ export class MarginController {
       user,
       body.amount,
       body.token,
-      body.destinationAddress,
+      body.publicKey,
     );
   }
 
