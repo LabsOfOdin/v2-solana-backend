@@ -7,7 +7,7 @@ import {
   OneToMany,
 } from 'typeorm';
 import { Position } from './position.entity';
-import { Trade } from './trade.entity';
+import { LimitOrder } from './limit-order.entity';
 import { MarketStatus } from '../types/market.types';
 
 @Entity('markets')
@@ -19,13 +19,7 @@ export class Market {
   symbol: string;
 
   @Column()
-  baseAsset: string;
-
-  @Column()
-  quoteAsset: string;
-
-  @Column({ type: 'decimal', precision: 40, scale: 20 })
-  minOrderSize: string;
+  tokenAddress: string;
 
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   maxLeverage: string;
@@ -39,26 +33,20 @@ export class Market {
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   makerFee: string;
 
-  @Column({ type: 'enum', enum: MarketStatus, default: MarketStatus.ACTIVE })
-  status: MarketStatus;
-
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   fundingRate: string;
 
-  @Column()
-  pythPriceAccountKey: string;
+  @Column({ type: 'enum', enum: MarketStatus, default: MarketStatus.ACTIVE })
+  status: MarketStatus;
 
-  @Column({ default: true })
-  allowIsolated: boolean;
+  @OneToMany(() => Position, (position) => position.openMarket)
+  openPositions: Position[];
 
-  @Column({ default: true })
-  allowCross: boolean;
+  @OneToMany(() => Position, (position) => position.closedMarket)
+  closedPositions: Position[];
 
-  @OneToMany(() => Position, (position) => position.market)
-  positions: Position[];
-
-  @OneToMany(() => Trade, (trade) => trade.market)
-  trades: Trade[];
+  @OneToMany(() => LimitOrder, (order) => order.market)
+  openLimitOrders: LimitOrder[];
 
   @CreateDateColumn()
   createdAt: Date;

@@ -8,6 +8,7 @@ import {
   JoinColumn,
 } from 'typeorm';
 import { User } from './user.entity';
+import { Market } from './market.entity';
 import { OrderSide, MarginType, OrderStatus } from '../types/trade.types';
 import { TokenType } from '../margin/types/token.types';
 
@@ -25,6 +26,10 @@ export class LimitOrder {
 
   @Column({ type: 'uuid' })
   marketId: string;
+
+  @ManyToOne(() => Market, (market) => market.openLimitOrders)
+  @JoinColumn({ name: 'marketId' })
+  market: Market;
 
   @Column({
     type: 'enum',

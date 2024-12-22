@@ -33,9 +33,19 @@ export class Position {
   @Column({ type: 'uuid' })
   marketId: string;
 
-  @ManyToOne(() => Market, (market) => market.positions)
-  @JoinColumn({ name: 'marketId' })
-  market: Market;
+  @ManyToOne(() => Market, (market) => market.openPositions)
+  @JoinColumn([
+    { name: 'marketId', referencedColumnName: 'id' },
+    { name: 'status', referencedColumnName: 'OPEN' },
+  ])
+  openMarket: Market;
+
+  @ManyToOne(() => Market, (market) => market.closedPositions)
+  @JoinColumn([
+    { name: 'marketId', referencedColumnName: 'id' },
+    { name: 'status', referencedColumnName: 'CLOSED' },
+  ])
+  closedMarket: Market;
 
   @Column({
     type: 'enum',

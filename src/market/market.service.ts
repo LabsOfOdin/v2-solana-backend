@@ -18,6 +18,7 @@ import {
 } from '../types/market.types';
 import { MathService } from '../utils/math.service';
 import { PriceService } from '../price/price.service';
+import { getAdminWallet } from 'src/common/config';
 
 @Injectable()
 export class MarketService {
@@ -33,7 +34,7 @@ export class MarketService {
     dto: CreateMarketDto,
     adminPublicKey: string,
   ): Promise<Market> {
-    if (adminPublicKey !== process.env.ADMIN_PUBLIC_KEY) {
+    if (adminPublicKey !== getAdminWallet()) {
       throw new UnauthorizedException('Only admin can create markets');
     }
 
@@ -60,7 +61,7 @@ export class MarketService {
     dto: UpdateMarketDto,
     adminPublicKey: string,
   ): Promise<Market> {
-    if (adminPublicKey !== process.env.ADMIN_PUBLIC_KEY) {
+    if (adminPublicKey !== getAdminWallet()) {
       throw new UnauthorizedException('Only admin can update markets');
     }
 

@@ -13,6 +13,15 @@ import { MathService } from '../utils/math.service';
 import { UserService } from '../user/user.service';
 import { MarginBalance } from './entities/margin-balance.entity';
 
+/**
+ * @security checks:
+ * - Only a user should be able to deposit / withdraw / get balance for their own account
+ * - Only an admin should be able to process / reject a withdrawal
+ *  --> rejections should return the margin back to the user's available balance
+ *  --> successful withdrawals should send the respective token to the user's destination address
+ * - Users should only be able to withdraw unlocked margin
+ */
+
 @Injectable()
 export class MarginService {
   private readonly SUPPORTED_TOKENS = new Set([TokenType.SOL, TokenType.USDC]);

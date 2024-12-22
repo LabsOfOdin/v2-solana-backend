@@ -33,7 +33,7 @@ export class Trade {
   @Column()
   marketId: string;
 
-  @ManyToOne(() => Market, (market) => market.trades)
+  @ManyToOne(() => Market)
   @JoinColumn({ name: 'marketId' })
   market: Market;
 
