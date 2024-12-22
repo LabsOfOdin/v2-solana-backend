@@ -1,10 +1,10 @@
 import {
   Entity,
-  PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
   UpdateDateColumn,
   OneToMany,
+  PrimaryColumn,
 } from 'typeorm';
 import { Position } from './position.entity';
 import { MarginLock } from './margin-lock.entity';
@@ -14,10 +14,7 @@ import { LimitOrder } from './limit-order.entity';
 
 @Entity('users')
 export class User {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
-
-  @Column({ unique: true })
+  @PrimaryColumn()
   publicKey: string;
 
   @OneToMany(() => Position, (position) => position.user)

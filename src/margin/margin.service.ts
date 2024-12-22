@@ -43,7 +43,7 @@ export class MarginService {
 
     // Get current margin balance
     const marginBalance = await this.userService.getMarginBalance(
-      user.id,
+      user.publicKey,
       token,
     );
 
@@ -55,14 +55,14 @@ export class MarginService {
 
     // Save updated balance
     await this.userService.updateMarginBalance(
-      user.id,
+      user.publicKey,
       token,
       newAvailableBalance,
       marginBalance.lockedBalance,
       marginBalance.unrealizedPnl,
     );
 
-    return this.userService.getMarginBalance(user.id, token);
+    return this.userService.getMarginBalance(user.publicKey, token);
   }
 
   async requestWithdrawal(
@@ -78,7 +78,7 @@ export class MarginService {
     }
 
     const marginBalance = await this.userService.getMarginBalance(
-      user.id,
+      user.publicKey,
       token,
     );
 
@@ -94,7 +94,7 @@ export class MarginService {
 
     // Update balance
     await this.userService.updateMarginBalance(
-      user.id,
+      user.publicKey,
       token,
       newAvailableBalance,
       marginBalance.lockedBalance,
@@ -103,7 +103,7 @@ export class MarginService {
 
     // Create withdrawal request
     const withdrawalRequest = this.withdrawalRequestRepository.create({
-      userId: user.id,
+      userId: user.publicKey,
       amount,
       token,
       destinationAddress,
@@ -276,6 +276,7 @@ export class MarginService {
     return this.withdrawalRequestRepository.save(withdrawal);
   }
 
+  // @audit - It's important to verify the solana deposit belongs to their account too.
   private async verifySolanaDeposit(
     txHash: string,
     amount: string,

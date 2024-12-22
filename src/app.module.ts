@@ -19,6 +19,7 @@ import { MarketModule } from './market/market.module';
 import { LimitOrderModule } from './limit-order/limit-order.module';
 import { LiquidationModule } from './liquidation/liquidation.module';
 import { UtilsModule } from './utils/utils.module';
+import { MarginModule } from './margin/margin.module';
 
 @Module({
   imports: [
@@ -69,6 +70,7 @@ import { UtilsModule } from './utils/utils.module';
     MarketModule,
     LimitOrderModule,
     LiquidationModule,
+    MarginModule,
   ],
 })
 export class AppModule {}

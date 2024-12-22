@@ -57,7 +57,7 @@ export class AuthService {
     }
 
     // Generate JWT token
-    const payload = { sub: user.id, publicKey: user.publicKey };
+    const payload = { sub: user.publicKey, publicKey: user.publicKey };
     const access_token = this.jwtService.sign(payload);
 
     return {

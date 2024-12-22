@@ -15,11 +15,11 @@ export class MarginBalance {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column()
   userId: string;
 
   @ManyToOne(() => User, (user) => user.marginBalances)
-  @JoinColumn({ name: 'userId' })
+  @JoinColumn({ name: 'userId', referencedColumnName: 'publicKey' })
   user: User;
 
   @Column({

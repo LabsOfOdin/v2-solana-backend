@@ -14,11 +14,11 @@ export class MarginLock {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ type: 'uuid' })
+  @Column()
   userId: string;
 
   @ManyToOne(() => User, (user) => user.marginLocks)
-  @JoinColumn({ name: 'userId' })
+  @JoinColumn({ name: 'userId', referencedColumnName: 'publicKey' })
   user: User;
 
   @Column({ type: 'uuid' })

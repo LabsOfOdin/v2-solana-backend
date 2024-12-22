@@ -27,7 +27,7 @@ export class Trade {
   userId: string;
 
   @ManyToOne(() => User)
-  @JoinColumn({ name: 'userId' })
+  @JoinColumn({ name: 'userId', referencedColumnName: 'publicKey' })
   user: User;
 
   @Column()

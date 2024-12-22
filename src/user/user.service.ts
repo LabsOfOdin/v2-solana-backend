@@ -42,29 +42,17 @@ export class UserService {
     return user;
   }
 
-  async getUserById(userId: string): Promise<User> {
-    const user = await this.userRepository.findOne({
-      where: { id: userId },
-    });
-
-    if (!user) {
-      throw new NotFoundException(`User with ID ${userId} not found`);
-    }
-
-    return user;
-  }
-
   async getMarginBalance(
-    userId: string,
+    publicKey: string,
     token: TokenType,
   ): Promise<MarginBalance> {
     const marginBalance = await this.marginBalanceRepository.findOne({
-      where: { userId, token },
+      where: { userId: publicKey, token },
     });
 
     if (!marginBalance) {
       return this.marginBalanceRepository.create({
-        userId,
+        userId: publicKey,
         token,
         availableBalance: '0',
         lockedBalance: '0',
@@ -76,19 +64,19 @@ export class UserService {
   }
 
   async updateMarginBalance(
-    userId: string,
+    publicKey: string,
     token: TokenType,
     availableBalance: string,
     lockedBalance: string,
     unrealizedPnl: string,
   ): Promise<void> {
     let marginBalance = await this.marginBalanceRepository.findOne({
-      where: { userId, token },
+      where: { userId: publicKey, token },
     });
 
     if (!marginBalance) {
       marginBalance = this.marginBalanceRepository.create({
-        userId,
+        userId: publicKey,
         token,
         availableBalance: '0',
         lockedBalance: '0',
@@ -104,13 +92,13 @@ export class UserService {
   }
 
   async createMarginLock(
-    userId: string,
+    publicKey: string,
     tradeId: string,
     token: TokenType,
     amount: string,
   ): Promise<MarginLock> {
     const marginLock = this.marginLockRepository.create({
-      userId,
+      userId: publicKey,
       tradeId,
       token,
       amount,
@@ -132,23 +120,23 @@ export class UserService {
   }
 
   async lockMargin(
-    userId: string,
+    publicKey: string,
     token: TokenType,
     amount: string,
     tradeId: string,
   ): Promise<void> {
-    const marginBalance = await this.getMarginBalance(userId, token);
+    const marginBalance = await this.getMarginBalance(publicKey, token);
 
     if (this.mathService.compare(marginBalance.availableBalance, amount) < 0) {
       throw new InsufficientMarginError('Insufficient available balance');
     }
 
     // Create margin lock
-    await this.createMarginLock(userId, tradeId, token, amount);
+    await this.createMarginLock(publicKey, tradeId, token, amount);
 
     // Update balances
     await this.updateMarginBalance(
-      userId,
+      publicKey,
       token,
       this.mathService.subtract(marginBalance.availableBalance, amount),
       this.mathService.add(marginBalance.lockedBalance, amount),

@@ -11,6 +11,12 @@ import {
 import { LimitOrderService } from './limit-order.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OrderRequest } from '../types/trade.types';
+import { Request as ExpressRequest } from 'express';
+import { User } from '../entities/user.entity';
+
+interface RequestWithUser extends ExpressRequest {
+  user: User;
+}
 
 @Controller('limit-orders')
 @UseGuards(JwtAuthGuard)
@@ -18,20 +24,25 @@ export class LimitOrderController {
   constructor(private readonly limitOrderService: LimitOrderService) {}
 
   @Post()
-  async createLimitOrder(@Body() orderRequest: OrderRequest, @Request() req) {
-    // Ensure the user ID matches the authenticated user
-    orderRequest.userId = req.user.id;
+  async createLimitOrder(
+    @Body() orderRequest: OrderRequest,
+    @Request() req: RequestWithUser,
+  ) {
+    orderRequest.userId = req.user.publicKey;
     return this.limitOrderService.createLimitOrder(orderRequest);
   }
 
   @Delete(':orderId')
-  async cancelLimitOrder(@Param('orderId') orderId: string, @Request() req) {
-    return this.limitOrderService.cancelLimitOrder(orderId, req.user.id);
+  async cancelLimitOrder(
+    @Param('orderId') orderId: string,
+    @Request() req: RequestWithUser,
+  ) {
+    return this.limitOrderService.cancelLimitOrder(orderId, req.user.publicKey);
   }
 
-  @Get('user')
-  async getUserLimitOrders(@Request() req) {
-    return this.limitOrderService.getUserLimitOrders(req.user.id);
+  @Get()
+  async getUserLimitOrders(@Request() req: RequestWithUser) {
+    return this.limitOrderService.getUserLimitOrders(req.user.publicKey);
   }
 
   @Get('market/:marketId')
