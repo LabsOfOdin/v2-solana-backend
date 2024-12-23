@@ -13,26 +13,12 @@ import {
   OrderSide,
   MarginType,
   Trade,
-  OrderType,
   UpdatePositionRequest,
   PartialCloseRequest,
 } from '../types/trade.types';
 import { Trade as TradeEntity } from '../entities/trade.entity';
 import { MarginService } from '../margin/margin.service';
-
-/**
- * This module will be responsible for handling all trade-related functionality.
- *
- * We'll need to implement:
- * - Funding Rates
- * - Borrowing Rates
- * - Liquidations
- * - Price Impact
- * - Leverage
- *
- * Trades will be peer to protocol (AMM), so we'll need to handle payouts from the liquidity pool.
- *
- */
+import { TokenType } from '../margin/types/token.types';
 
 @Injectable()
 export class TradeService {
@@ -45,7 +31,6 @@ export class TradeService {
     private readonly tradeRepository: Repository<TradeEntity>,
     private readonly priceService: PriceService,
     private readonly liquidityService: LiquidityService,
-    private readonly userService: UserService,
     private readonly mathService: MathService,
     private readonly cacheService: CacheService,
     private readonly marginService: MarginService,
@@ -64,52 +49,104 @@ export class TradeService {
   }
 
   async openPosition(orderRequest: OrderRequest): Promise<Position> {
-    // 1. Validate user has enough margin
-    const marginBalance = await this.marginService.getBalance(
-      orderRequest.userId,
-      orderRequest.token,
-    );
-    const requiredMargin = this.calculateRequiredMargin(orderRequest);
-
-    if (
-      this.mathService.compare(marginBalance.availableBalance, requiredMargin) <
-      0
-    ) {
-      throw new Error('Insufficient margin');
-    }
-
-    // 2. Check liquidity pool capacity
-    await this.liquidityService.validateLiquidityForTrade(orderRequest);
-
-    // 3. Get current market price and calculate entry price with slippage
+    // 1. Get current market price and calculate entry price with slippage
     const marketPrice = await this.priceService.getCurrentPrice(
       orderRequest.marketId,
     );
     const entryPrice = this.calculateEntryPrice(marketPrice, orderRequest);
 
-    // 4. Lock margin for the trade
-    await this.marginService.lockMargin(
-      orderRequest.userId,
-      orderRequest.token,
-      requiredMargin,
-      orderRequest.id,
+    // 2. Calculate required margin in USD
+    const requiredMarginUSD = await this.calculateRequiredMargin(orderRequest);
+
+    // 3. Get margin balances for supported tokens
+    const [solBalance, usdcBalance] = await Promise.all([
+      this.marginService.getBalance(orderRequest.userId, TokenType.SOL),
+      this.marginService.getBalance(orderRequest.userId, TokenType.USDC),
+    ]);
+
+    // 4. Convert SOL balance to USD for comparison
+    const solPrice = await this.priceService.getSolPrice();
+    const solBalanceInUSD = this.mathService.multiply(
+      solBalance.availableBalance,
+      solPrice,
     );
 
-    // 5. Create position
+    // 5. Calculate how much of each token to lock based on their USD values
+    let solAmountToLock = '0';
+    let usdcAmountToLock = '0';
+    let marginType = MarginType.ISOLATED;
+
+    const totalAvailableUSD = this.mathService.add(
+      solBalanceInUSD,
+      usdcBalance.availableBalance,
+    );
+
+    if (this.mathService.compare(totalAvailableUSD, requiredMarginUSD) < 0) {
+      throw new Error('Insufficient margin');
+    }
+
+    // First try to use a single token (USDC first, then SOL) for isolated margin
+    if (
+      this.mathService.compare(
+        usdcBalance.availableBalance,
+        requiredMarginUSD,
+      ) >= 0
+    ) {
+      usdcAmountToLock = requiredMarginUSD;
+    } else if (
+      this.mathService.compare(solBalanceInUSD, requiredMarginUSD) >= 0
+    ) {
+      solAmountToLock = this.mathService.divide(requiredMarginUSD, solPrice);
+    } else {
+      // If no single token has enough, use both tokens (cross margin)
+      marginType = MarginType.CROSS;
+      usdcAmountToLock = usdcBalance.availableBalance;
+      const remainingMarginUSD = this.mathService.subtract(
+        requiredMarginUSD,
+        usdcBalance.availableBalance,
+      );
+      solAmountToLock = this.mathService.divide(remainingMarginUSD, solPrice);
+    }
+
+    // 6. Lock margins
+    const positionId = crypto.randomUUID();
+    if (this.mathService.compare(usdcAmountToLock, '0') > 0) {
+      await this.marginService.lockMargin(
+        orderRequest.userId,
+        TokenType.USDC,
+        usdcAmountToLock,
+        positionId,
+      );
+    }
+    if (this.mathService.compare(solAmountToLock, '0') > 0) {
+      await this.marginService.lockMargin(
+        orderRequest.userId,
+        TokenType.SOL,
+        solAmountToLock,
+        positionId,
+      );
+    }
+
+    // 7. Check liquidity pool capacity
+    await this.liquidityService.validateLiquidityForTrade(orderRequest);
+
+    // 8. Create position
     const position = await this.positionRepository.save(
       this.positionRepository.create({
+        id: positionId,
         userId: orderRequest.userId,
         marketId: orderRequest.marketId,
         side: orderRequest.side,
         size: orderRequest.size,
         entryPrice,
         leverage: orderRequest.leverage,
-        marginType: orderRequest.marginType,
+        marginType,
         stopLossPrice: orderRequest.stopLossPrice,
         takeProfitPrice: orderRequest.takeProfitPrice,
         unrealizedPnl: '0',
-        margin: requiredMargin,
-        token: orderRequest.token,
+        margin: requiredMarginUSD,
+        lockedMarginSOL: solAmountToLock,
+        lockedMarginUSDC: usdcAmountToLock,
       }),
     );
 
@@ -301,28 +338,60 @@ export class TradeService {
       position.marketId,
     );
 
-    // Calculate final PnL
-    const realizedPnl = this.calculatePnl(
+    // Calculate final PnL in USD
+    const realizedPnlUSD = this.calculatePnl(
       position.side,
       position.size,
       position.entryPrice,
       currentPrice,
     );
 
-    // Release margin with PnL
-    await this.marginService.releaseMargin(
-      position.userId,
-      position.token,
-      position.id,
-      realizedPnl,
+    // Get SOL price to convert PnL
+    const solPrice = await this.priceService.getSolPrice();
+
+    // Distribute PnL proportionally to locked margins
+    const totalLockedUSD = this.mathService.add(
+      this.mathService.multiply(position.lockedMarginSOL, solPrice),
+      position.lockedMarginUSDC,
     );
+
+    if (this.mathService.compare(position.lockedMarginSOL, '0') > 0) {
+      const solShare = this.mathService.divide(
+        this.mathService.multiply(position.lockedMarginSOL, solPrice),
+        totalLockedUSD,
+      );
+      const solPnL = this.mathService.divide(
+        this.mathService.multiply(realizedPnlUSD, solShare),
+        solPrice,
+      );
+      await this.marginService.releaseMargin(
+        position.userId,
+        TokenType.SOL,
+        position.id,
+        solPnL,
+      );
+    }
+
+    if (this.mathService.compare(position.lockedMarginUSDC, '0') > 0) {
+      const usdcShare = this.mathService.divide(
+        position.lockedMarginUSDC,
+        totalLockedUSD,
+      );
+      const usdcPnL = this.mathService.multiply(realizedPnlUSD, usdcShare);
+      await this.marginService.releaseMargin(
+        position.userId,
+        TokenType.USDC,
+        position.id,
+        usdcPnL,
+      );
+    }
 
     // Close position
     await this.positionRepository.update(position.id, {
       status: PositionStatus.CLOSED,
       closedAt: new Date(),
       closingPrice: currentPrice,
-      realizedPnl,
+      realizedPnl: realizedPnlUSD,
     });
   }
 
@@ -340,11 +409,22 @@ export class TradeService {
     );
 
     await this.positionRepository.update(position.id, { unrealizedPnl });
-    await this.marginService.updateUnrealizedPnl(
-      position.userId,
-      position.token,
-      unrealizedPnl,
-    );
+
+    // Update PnL for both token types if they are locked
+    if (this.mathService.compare(position.lockedMarginSOL, '0') > 0) {
+      await this.marginService.updateUnrealizedPnl(
+        position.userId,
+        TokenType.SOL,
+        unrealizedPnl,
+      );
+    }
+    if (this.mathService.compare(position.lockedMarginUSDC, '0') > 0) {
+      await this.marginService.updateUnrealizedPnl(
+        position.userId,
+        TokenType.USDC,
+        unrealizedPnl,
+      );
+    }
   }
 
   async getPosition(positionId: string): Promise<Position> {
@@ -377,9 +457,10 @@ export class TradeService {
     );
   }
 
-  private calculateRequiredMargin(order: OrderRequest): string {
+  private async calculateRequiredMargin(order: OrderRequest): Promise<string> {
+    const marketPrice = await this.priceService.getCurrentPrice(order.marketId);
     return this.mathService.divide(
-      this.mathService.multiply(order.size, order.price || '0'),
+      this.mathService.multiply(order.size, marketPrice),
       order.leverage,
     );
   }
@@ -476,31 +557,87 @@ export class TradeService {
       request.size,
     );
 
-    // Calculate realized PnL for the closed portion
-    const realizedPnl = this.calculatePnl(
+    // Calculate realized PnL for the closed portion in USD
+    const realizedPnlUSD = this.calculatePnl(
       position.side,
       request.size,
       position.entryPrice,
       request.price || currentPrice,
     );
 
-    // Release proportional margin with PnL
-    const marginToRelease = this.mathService.multiply(
-      position.margin,
-      this.mathService.divide(request.size, position.size),
+    // Get SOL price to convert PnL
+    const solPrice = await this.priceService.getCurrentPrice('SOL/USD');
+
+    // Calculate proportion of position being closed
+    const closeProportion = this.mathService.divide(
+      request.size,
+      position.size,
     );
-    await this.marginService.releaseMargin(
-      position.userId,
-      position.token,
-      position.id,
-      realizedPnl,
+
+    // Calculate margin to release for each token
+    const solMarginToRelease = this.mathService.multiply(
+      position.lockedMarginSOL,
+      closeProportion,
     );
+    const usdcMarginToRelease = this.mathService.multiply(
+      position.lockedMarginUSDC,
+      closeProportion,
+    );
+
+    // Calculate total locked value in USD for PnL distribution
+    const totalLockedUSD = this.mathService.add(
+      this.mathService.multiply(solMarginToRelease, solPrice),
+      usdcMarginToRelease,
+    );
+
+    // Release proportional margin with PnL for each token
+    if (this.mathService.compare(solMarginToRelease, '0') > 0) {
+      const solShare = this.mathService.divide(
+        this.mathService.multiply(solMarginToRelease, solPrice),
+        totalLockedUSD,
+      );
+      const solPnL = this.mathService.divide(
+        this.mathService.multiply(realizedPnlUSD, solShare),
+        solPrice,
+      );
+      await this.marginService.releaseMargin(
+        position.userId,
+        TokenType.SOL,
+        position.id,
+        solPnL,
+      );
+    }
+
+    if (this.mathService.compare(usdcMarginToRelease, '0') > 0) {
+      const usdcShare = this.mathService.divide(
+        usdcMarginToRelease,
+        totalLockedUSD,
+      );
+      const usdcPnL = this.mathService.multiply(realizedPnlUSD, usdcShare);
+      await this.marginService.releaseMargin(
+        position.userId,
+        TokenType.USDC,
+        position.id,
+        usdcPnL,
+      );
+    }
 
     // Update position
     const updatedPosition = await this.positionRepository.save({
       ...position,
       size: remainingSize,
-      margin: this.mathService.subtract(position.margin, marginToRelease),
+      lockedMarginSOL: this.mathService.subtract(
+        position.lockedMarginSOL,
+        solMarginToRelease,
+      ),
+      lockedMarginUSDC: this.mathService.subtract(
+        position.lockedMarginUSDC,
+        usdcMarginToRelease,
+      ),
+      margin: this.mathService.subtract(
+        position.margin,
+        this.mathService.multiply(position.margin, closeProportion),
+      ),
       stopLossPrice: request.stopLossPrice || position.stopLossPrice,
       takeProfitPrice: request.takeProfitPrice || position.takeProfitPrice,
     });
@@ -516,7 +653,7 @@ export class TradeService {
       price: request.price || currentPrice,
       leverage: position.leverage,
       marginType: position.marginType,
-      realizedPnl,
+      realizedPnl: realizedPnlUSD,
       fee: this.calculateFee(request.size, request.price || currentPrice),
       createdAt: new Date(),
       type: request.type,

@@ -30,14 +30,17 @@ export interface OrderRequest {
   userId: string;
   marketId: string;
   side: OrderSide;
-  type: OrderType;
   size: string;
-  price?: string;
   leverage: string;
-  marginType: MarginType;
+  marginType?: MarginType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
+}
+
+export interface LimitOrderRequest extends OrderRequest {
+  price: string;
   token: TokenType;
+  type: OrderType;
 }
 
 export interface UpdatePositionRequest {

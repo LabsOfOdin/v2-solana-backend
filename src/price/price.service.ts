@@ -15,11 +15,11 @@ import { Market } from '../entities/market.entity';
 @Injectable()
 export class PriceService {
   private binanceWebSocket: WebSocket;
-  private pingInterval: number;
-  private pingTrigger: any;
 
   // USDC/USD price from Binance
   private usdcPrice: number;
+  // SOL/USD price from Binance
+  private solPrice: number;
 
   // Rate limiter --> increase once updated to Metis v6 endpoint
   private solanaLimiter = new RateLimiter({
@@ -37,18 +37,28 @@ export class PriceService {
   }
 
   async getCurrentPrice(marketId: string): Promise<string> {
-    const market = await this.marketRepository.findOne({
-      where: { id: marketId },
-    });
-    if (!market) {
-      throw new Error(`Market with ID ${marketId} not found`);
-    }
+    const market = await this.getMarketFromMarketId(marketId);
 
-    const price = await this.getSolanaPrice(market.tokenAddress, market.symbol);
+    const price = await this.getDexPrice(market.tokenAddress, market.symbol);
     return price.toString();
   }
 
-  async getSolanaPrice(tokenAddress: string, ticker: string): Promise<number> {
+  async getSolPrice(): Promise<number> {
+    return this.solPrice;
+  }
+
+  async getUsdcPrice(): Promise<number> {
+    return this.usdcPrice;
+  }
+
+  /**
+   * ========================== Private Methods ==========================
+   */
+
+  private async getDexPrice(
+    tokenAddress: string,
+    ticker: string,
+  ): Promise<number> {
     const cacheKey = `solana-price-${tokenAddress}`;
     const cachedPrice = await this.cacheManager.get<number>(cacheKey);
     if (cachedPrice) {
@@ -118,16 +128,20 @@ export class PriceService {
 
   private connectBinanceWebSocket() {
     this.binanceWebSocket = new WebSocket(
-      'wss://stream.binance.com:9443/stream?streams=usdcusdt@trade',
+      'wss://stream.binance.com:9443/stream?streams=usdcusdt@trade/solusdt@trade',
     );
 
     this.binanceWebSocket.on('message', (data) => {
       let priceObject = JSON.parse(data.toString());
 
+      const symbol = priceObject.data.s.slice(0, -4);
       const price = parseFloat(priceObject.data.p);
 
-      // Set the USDC Price in Storage
-      this.usdcPrice = price;
+      if (symbol === 'SOLUSDT') {
+        this.solPrice = price;
+      } else if (symbol === 'USDCUSDT') {
+        this.usdcPrice = price;
+      }
     });
 
     this.binanceWebSocket.on('close', (code, reason) => {
@@ -155,6 +169,28 @@ export class PriceService {
   /**
    * ========================== Helper Functions ==========================
    */
+
+  private async getMarketFromMarketId(marketId: string): Promise<Market> {
+    const cacheKey = `market-${marketId}`;
+
+    const cachedMarket = await this.cacheManager.get<Market>(cacheKey);
+    if (cachedMarket) {
+      return cachedMarket;
+    }
+
+    const market = await this.marketRepository.findOne({
+      where: { id: marketId },
+    });
+
+    if (!market) {
+      throw new Error(`Market with ID ${marketId} not found`);
+    }
+
+    // 0 means cache forever
+    await this.cacheManager.set(cacheKey, market, 0);
+
+    return market;
+  }
 
   /**
    * @dev Update this to instead calculate the funding rate based on

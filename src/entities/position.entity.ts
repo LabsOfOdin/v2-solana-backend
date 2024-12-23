@@ -86,17 +86,17 @@ export class Position {
   @Column({ type: 'decimal', precision: 40, scale: 18 })
   margin: string;
 
+  @Column({ type: 'decimal', precision: 40, scale: 18, default: '0' })
+  lockedMarginSOL: string;
+
+  @Column({ type: 'decimal', precision: 40, scale: 18, default: '0' })
+  lockedMarginUSDC: string;
+
   @Column({ type: 'decimal', precision: 40, scale: 18 })
   unrealizedPnl: string;
 
   @Column({ type: 'decimal', precision: 40, scale: 18, nullable: true })
   realizedPnl?: string;
-
-  @Column({
-    type: 'enum',
-    enum: TokenType,
-  })
-  token: TokenType;
 
   @Column({
     type: 'enum',

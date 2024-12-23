@@ -1,35 +1,19 @@
-import {
-  Controller,
-  Post,
-  Body,
-  Get,
-  Param,
-  Request,
-  Query,
-} from '@nestjs/common';
+import { Controller, Post, Body, Get, Param, Query } from '@nestjs/common';
 import { TradeService } from './trade.service';
 import {
   OrderRequest,
   UpdatePositionRequest,
   PartialCloseRequest,
 } from '../types/trade.types';
-import { Request as ExpressRequest } from 'express';
-import { User } from '../entities/user.entity';
-
-interface RequestWithUser extends ExpressRequest {
-  user: User;
-}
+import { validatePublicKey } from 'src/common/validators';
 
 @Controller('trade')
 export class TradeController {
   constructor(private readonly tradeService: TradeService) {}
 
   @Post()
-  async createOrder(
-    @Body() orderRequest: OrderRequest,
-    @Request() req: RequestWithUser,
-  ) {
-    orderRequest.userId = req.user.publicKey;
+  async createOrder(@Body() orderRequest: OrderRequest) {
+    validatePublicKey(orderRequest.userId);
     return this.tradeService.openPosition(orderRequest);
   }
 
@@ -37,24 +21,20 @@ export class TradeController {
   async updatePosition(
     @Param('positionId') positionId: string,
     @Body() updates: UpdatePositionRequest,
-    @Request() req: RequestWithUser,
+    @Query('publicKey') publicKey: string,
   ) {
-    return this.tradeService.updatePosition(
-      positionId,
-      req.user.publicKey,
-      updates,
-    );
+    return this.tradeService.updatePosition(positionId, publicKey, updates);
   }
 
   @Post('position/:positionId/partial-close')
   async partialClosePosition(
     @Param('positionId') positionId: string,
     @Body() request: PartialCloseRequest,
-    @Request() req: RequestWithUser,
+    @Query('publicKey') publicKey: string,
   ) {
     return this.tradeService.partialClosePosition(
       positionId,
-      req.user.publicKey,
+      publicKey,
       request,
     );
   }
@@ -62,26 +42,26 @@ export class TradeController {
   @Post('position/:positionId/close')
   async closePosition(
     @Param('positionId') positionId: string,
-    @Request() req: RequestWithUser,
+    @Query('publicKey') publicKey: string,
   ) {
-    return this.tradeService.closePosition(positionId, req.user.publicKey);
+    return this.tradeService.closePosition(positionId, publicKey);
   }
 
   @Get('positions')
-  async getUserPositions(@Request() req: RequestWithUser) {
-    return this.tradeService.getUserPositions(req.user.publicKey);
+  async getUserPositions(@Query('publicKey') publicKey: string) {
+    return this.tradeService.getUserPositions(publicKey);
   }
 
   @Get('position/:positionId')
   async getPosition(
     @Param('positionId') positionId: string,
-    @Request() req: RequestWithUser,
+    @Query('publicKey') publicKey: string,
   ) {
     return this.tradeService.getPosition(positionId);
   }
 
   @Get('trades')
-  async getUserTrades(@Request() req: RequestWithUser) {
-    return this.tradeService.getUserTrades(req.user.publicKey);
+  async getUserTrades(@Query('publicKey') publicKey: string) {
+    return this.tradeService.getUserTrades(publicKey);
   }
 }

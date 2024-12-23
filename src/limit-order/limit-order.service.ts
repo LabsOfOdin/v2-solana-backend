@@ -8,8 +8,8 @@ import { MarginService } from '../margin/margin.service';
 import { MathService } from '../utils/math.service';
 import {
   OrderRequest,
+  LimitOrderRequest,
   OrderStatus,
-  OrderType,
   OrderSide,
 } from '../types/trade.types';
 
@@ -40,11 +40,7 @@ export class LimitOrderService {
     }, this.checkInterval);
   }
 
-  async createLimitOrder(orderRequest: OrderRequest): Promise<LimitOrder> {
-    if (!orderRequest.price) {
-      throw new Error('Price is required for limit orders');
-    }
-
+  async createLimitOrder(orderRequest: LimitOrderRequest): Promise<LimitOrder> {
     // Calculate required margin
     const requiredMargin = this.mathService.divide(
       this.mathService.multiply(orderRequest.size, orderRequest.price),
@@ -155,18 +151,15 @@ export class LimitOrderService {
   }
 
   private async executeLimitOrder(order: LimitOrder): Promise<void> {
-    // Create order request
+    // Create market order request from limit order
     const orderRequest: OrderRequest = {
       id: order.id,
       userId: order.userId,
       marketId: order.marketId,
       side: order.side,
       size: order.size,
-      type: OrderType.LIMIT,
-      price: order.price,
       leverage: order.leverage,
       marginType: order.marginType,
-      token: order.token,
     };
 
     try {

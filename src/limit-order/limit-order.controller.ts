@@ -5,44 +5,35 @@ import {
   Delete,
   Body,
   Param,
-  UseGuards,
-  Request,
+  Query,
 } from '@nestjs/common';
 import { LimitOrderService } from './limit-order.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { OrderRequest } from '../types/trade.types';
-import { Request as ExpressRequest } from 'express';
-import { User } from '../entities/user.entity';
-
-interface RequestWithUser extends ExpressRequest {
-  user: User;
-}
+import { LimitOrderRequest } from '../types/trade.types';
+import { validatePublicKey } from 'src/common/validators';
 
 @Controller('limit-orders')
-@UseGuards(JwtAuthGuard)
 export class LimitOrderController {
   constructor(private readonly limitOrderService: LimitOrderService) {}
 
   @Post()
-  async createLimitOrder(
-    @Body() orderRequest: OrderRequest,
-    @Request() req: RequestWithUser,
-  ) {
-    orderRequest.userId = req.user.publicKey;
+  async createLimitOrder(@Body() orderRequest: LimitOrderRequest) {
+    validatePublicKey(orderRequest.userId);
     return this.limitOrderService.createLimitOrder(orderRequest);
   }
 
   @Delete(':orderId')
   async cancelLimitOrder(
     @Param('orderId') orderId: string,
-    @Request() req: RequestWithUser,
+    @Query('publicKey') publicKey: string,
   ) {
-    return this.limitOrderService.cancelLimitOrder(orderId, req.user.publicKey);
+    validatePublicKey(publicKey);
+    return this.limitOrderService.cancelLimitOrder(orderId, publicKey);
   }
 
   @Get()
-  async getUserLimitOrders(@Request() req: RequestWithUser) {
-    return this.limitOrderService.getUserLimitOrders(req.user.publicKey);
+  async getUserLimitOrders(@Query('publicKey') publicKey: string) {
+    validatePublicKey(publicKey);
+    return this.limitOrderService.getUserLimitOrders(publicKey);
   }
 
   @Get('market/:marketId')
