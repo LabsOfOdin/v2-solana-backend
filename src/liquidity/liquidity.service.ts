@@ -5,34 +5,53 @@ import { PriceService } from '../price/price.service';
 
 @Injectable()
 export class LiquidityService {
+  // Mock pool state with plenty of liquidity
+  private mockPoolState = {
+    availableLiquidity: '10000000', // 10M USDC
+    totalLiquidity: '10000000',
+    utilizationRate: '0',
+    maxUtilizationRate: '0.8',
+  };
+
   constructor(
     private readonly mathService: MathService,
     private readonly priceService: PriceService,
-    // TODO: Inject Solana program service/connection
   ) {}
 
   async validateLiquidityForTrade(order: OrderRequest): Promise<void> {
-    // TODO: Fetch current liquidity pool state from Solana program
-    const poolState = (await this.getSolanaPoolState()) as any;
     const requiredLiquidity = await this.calculateRequiredLiquidity(order);
 
     if (
       this.mathService.compare(
-        poolState.availableLiquidity,
+        this.mockPoolState.availableLiquidity,
         requiredLiquidity,
       ) < 0
     ) {
       throw new Error('Insufficient liquidity in pool');
     }
 
+    const utilizationRate = this.mathService.divide(
+      requiredLiquidity,
+      this.mockPoolState.totalLiquidity,
+    );
+
     if (
       this.mathService.compare(
-        poolState.utilizationRate,
-        poolState.maxUtilizationRate,
+        utilizationRate,
+        this.mockPoolState.maxUtilizationRate,
       ) > 0
     ) {
       throw new Error('Trade would exceed maximum utilization rate');
     }
+  }
+
+  async getAvailableLiquidity(): Promise<{
+    availableLiquidity: string;
+    totalLiquidity: string;
+    utilizationRate: string;
+    maxUtilizationRate: string;
+  }> {
+    return this.mockPoolState;
   }
 
   private async calculateRequiredLiquidity(
@@ -45,10 +64,5 @@ export class LiquidityService {
       this.mathService.multiply(order.size, currentPrice),
       order.leverage,
     );
-  }
-
-  private async getSolanaPoolState() {
-    // TODO: Implement fetching pool state from Solana program
-    throw new Error('Not implemented: Need to fetch pool state from Solana');
   }
 }
