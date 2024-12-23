@@ -7,6 +7,7 @@ import { TradeService } from '../trade/trade.service';
 import { MarginService } from '../margin/margin.service';
 import { MathService } from '../utils/math.service';
 import { OrderSide, MarginType } from '../types/trade.types';
+import { TokenType } from '../margin/types/token.types';
 
 @Injectable()
 export class LiquidationService {
@@ -154,20 +155,52 @@ export class LiquidationService {
         currentPrice,
       );
 
-      // Release margin with PnL (which will be negative in liquidation case)
-      await this.marginService.releaseMargin(
-        position.userId,
-        position.token,
-        position.id,
-        realizedPnl,
+      // Get SOL price to convert PnL
+      const solPrice = await this.priceService.getSolPrice();
+
+      // Distribute PnL proportionally to locked margins
+      const totalLockedUSD = this.mathService.add(
+        this.mathService.multiply(position.lockedMarginSOL, solPrice),
+        position.lockedMarginUSDC,
       );
+
+      if (this.mathService.compare(position.lockedMarginSOL, '0') > 0) {
+        const solShare = this.mathService.divide(
+          this.mathService.multiply(position.lockedMarginSOL, solPrice),
+          totalLockedUSD,
+        );
+        const solPnL = this.mathService.divide(
+          this.mathService.multiply(realizedPnl, solShare),
+          solPrice,
+        );
+        await this.marginService.releaseMargin(
+          position.userId,
+          TokenType.SOL,
+          position.id,
+          solPnL,
+        );
+      }
+
+      if (this.mathService.compare(position.lockedMarginUSDC, '0') > 0) {
+        const usdcShare = this.mathService.divide(
+          position.lockedMarginUSDC,
+          totalLockedUSD,
+        );
+        const usdcPnL = this.mathService.multiply(realizedPnl, usdcShare);
+        await this.marginService.releaseMargin(
+          position.userId,
+          TokenType.USDC,
+          position.id,
+          usdcPnL,
+        );
+      }
 
       // Update position status
       await this.positionRepository.update(position.id, {
         status: PositionStatus.LIQUIDATED,
         closedAt: new Date(),
         closingPrice: currentPrice,
-        realizedPnl,
+        realizedPnl: realizedPnl,
       });
 
       this.logger.log(
