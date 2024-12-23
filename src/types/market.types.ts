@@ -7,6 +7,7 @@ export enum MarketStatus {
 export interface CreateMarketDto {
   symbol: string;
   tokenAddress: string;
+  poolAddress: string;
   maxLeverage: string;
   maintainanceMargin: string;
   takerFee: string;
@@ -20,12 +21,14 @@ export interface UpdateMarketDto {
   makerFee?: string;
   status?: MarketStatus;
   fundingRate?: string;
+  poolAddress?: string;
 }
 
 export interface MarketInfo {
   id: string;
   symbol: string;
   tokenAddress: string;
+  poolAddress: string;
   maxLeverage: string;
   maintainanceMargin: string;
   takerFee: string;

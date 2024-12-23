@@ -8,6 +8,8 @@ import { LiquidityPool } from './src/entities/liquidity-pool.entity';
 import { LPPosition } from './src/entities/lp-position.entity';
 import { Trade } from './src/entities/trade.entity';
 import { Market } from './src/entities/market.entity';
+import { LimitOrder } from './src/entities/limit-order.entity';
+import { MarginBalance } from './src/margin/entities/margin-balance.entity';
 
 config();
 
@@ -28,6 +30,8 @@ export default new DataSource({
     LPPosition,
     Trade,
     Market,
+    LimitOrder,
+    MarginBalance,
   ],
   migrations: ['src/migrations/*.ts'],
   ssl: {

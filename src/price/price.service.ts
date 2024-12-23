@@ -28,6 +28,11 @@ export class PriceService {
     interval: 'minute', // 600 requests per minute
   });
 
+  private geckoTerminalLimiter = new RateLimiter({
+    tokensPerInterval: 30,
+    interval: 'minute',
+  });
+
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     @InjectRepository(Market)
@@ -38,6 +43,10 @@ export class PriceService {
     // Fetch initial prices
     this.fetchInitialPrices();
   }
+
+  /**
+   * ========================== Public Methods ==========================
+   */
 
   async getCurrentPrice(marketId: string): Promise<string> {
     const market = await this.getMarketFromMarketId(marketId);
@@ -64,6 +73,95 @@ export class PriceService {
       throw new Error('Unable to fetch USDC price');
     }
     return this.usdcPrice;
+  }
+
+  /**
+   * ========================== Candlestick Methods ==========================
+   */
+
+  async fetchGeckoTerminalOHLCV(
+    network: string,
+    poolAddress: string,
+    timeframe: string,
+    aggregate: string,
+    beforeTimestamp?: number,
+    limit: number = 1000,
+    currency: string = 'usd',
+    token: string = 'base',
+  ): Promise<any> {
+    const cacheKey = `geckoterminal-${network}-${poolAddress}-${timeframe}-${aggregate}-${beforeTimestamp}-${limit}-${currency}-${token}`;
+
+    // Check if the data is in the cache
+    const cachedData = await this.cacheManager.get(cacheKey);
+    if (cachedData) {
+      return cachedData;
+    }
+
+    const baseUrl = 'https://api.geckoterminal.com/api/v2';
+
+    const params = new URLSearchParams({
+      aggregate,
+      limit: limit.toString(),
+      currency,
+      token,
+    });
+
+    if (beforeTimestamp) {
+      params.append('before_timestamp', beforeTimestamp.toString());
+    }
+
+    let mappedTimeframe = 'day';
+
+    // Map timeframe from CryptoCompare equivalents to GeckoTerminal
+    if (timeframe === 'histominute') {
+      mappedTimeframe = 'minute';
+    } else if (timeframe === 'histohour') {
+      mappedTimeframe = 'hour';
+    } else if (timeframe === 'histoday') {
+      mappedTimeframe = 'day';
+    } else {
+      mappedTimeframe = 'minute';
+    }
+
+    const url = `${baseUrl}/networks/${network}/pools/${poolAddress}/ohlcv/${mappedTimeframe}?${params}`;
+
+    // Apply rate limiting
+    await this.geckoTerminalLimiter.removeTokens(1);
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          Accept: 'application/json;version=20230302',
+        },
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(
+          `HTTP error! status: ${response.status}, body: ${errorBody}`,
+        );
+      }
+
+      const data = await response.json();
+
+      // Cache the result for 5 minutes
+      await this.cacheManager.set(cacheKey, data, 300_000); // 300000 ms = 5 minutes
+      return data;
+    } catch (error) {
+      console.error('Error fetching data from GeckoTerminal:', {
+        error: error instanceof Error ? error.message : String(error),
+        url,
+        network,
+        poolAddress,
+        timeframe,
+        aggregate,
+        beforeTimestamp,
+        limit,
+        currency,
+        token,
+      });
+      throw error;
+    }
   }
 
   /**
@@ -99,11 +197,6 @@ export class PriceService {
       }
 
       const tokenData = jupiterData.data[tokenAddress];
-
-      // Validate the confidence level and type
-      if (tokenData.extraInfo?.confidenceLevel === 'low') {
-        console.warn(`Low confidence price for ${ticker}`);
-      }
 
       // Get the most accurate price based on available data
       let priceInUsdc: number;
@@ -218,18 +311,22 @@ export class PriceService {
       return cachedMarket;
     }
 
-    const market = await this.marketRepository.findOne({
-      where: { id: marketId },
-    });
+    try {
+      const market = await this.marketRepository.findOne({
+        where: { id: marketId },
+      });
 
-    if (!market) {
+      // 0 means cache forever
+      await this.cacheManager.set(cacheKey, market, 0);
+
+      return market;
+    } catch (error) {
+      console.error(
+        `Error fetching market with ID ${marketId}:`,
+        this.getErrorMessage(error),
+      );
       throw new Error(`Market with ID ${marketId} not found`);
     }
-
-    // 0 means cache forever
-    await this.cacheManager.set(cacheKey, market, 0);
-
-    return market;
   }
 
   /**

@@ -21,6 +21,9 @@ export class Market {
   @Column()
   tokenAddress: string;
 
+  @Column()
+  poolAddress: string;
+
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   maxLeverage: string;
 
