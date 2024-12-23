@@ -7,6 +7,7 @@ import { UserModule } from '../user/user.module';
 import { LiquidityModule } from '../liquidity/liquidity.module';
 import { PriceModule } from '../price/price.module';
 import { UtilsModule } from '../utils/utils.module';
+import { MarginModule } from 'src/margin/margin.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { UtilsModule } from '../utils/utils.module';
     LiquidityModule,
     PriceModule,
     UtilsModule,
+    MarginModule,
   ],
   providers: [TradeService],
   exports: [TradeService],

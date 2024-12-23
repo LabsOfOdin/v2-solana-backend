@@ -15,6 +15,7 @@ import { Market } from '../entities/market.entity';
 @Injectable()
 export class PriceService {
   private binanceWebSocket: WebSocket;
+  private wsConnected: boolean = false;
 
   // USDC/USD price from Binance
   private usdcPrice: number;
@@ -34,6 +35,8 @@ export class PriceService {
   ) {
     // Initialize WebSocket connections
     this.connectBinanceWebSocket();
+    // Fetch initial prices
+    this.fetchInitialPrices();
   }
 
   async getCurrentPrice(marketId: string): Promise<string> {
@@ -44,10 +47,22 @@ export class PriceService {
   }
 
   async getSolPrice(): Promise<number> {
+    if (!this.wsConnected || !this.solPrice) {
+      await this.fetchInitialPrices();
+    }
+    if (!this.solPrice) {
+      throw new Error('Unable to fetch SOL price');
+    }
     return this.solPrice;
   }
 
   async getUsdcPrice(): Promise<number> {
+    if (!this.wsConnected || !this.usdcPrice) {
+      await this.fetchInitialPrices();
+    }
+    if (!this.usdcPrice) {
+      throw new Error('Unable to fetch USDC price');
+    }
     return this.usdcPrice;
   }
 
@@ -131,22 +146,33 @@ export class PriceService {
       'wss://stream.binance.com:9443/stream?streams=usdcusdt@trade/solusdt@trade',
     );
 
+    this.binanceWebSocket.on('open', () => {
+      console.log('Binance WebSocket connected');
+      this.wsConnected = true;
+    });
+
     this.binanceWebSocket.on('message', (data) => {
       let priceObject = JSON.parse(data.toString());
 
       const symbol = priceObject.data.s.slice(0, -4);
       const price = parseFloat(priceObject.data.p);
 
-      if (symbol === 'SOLUSDT') {
+      if (symbol === 'SOL') {
         this.solPrice = price;
-      } else if (symbol === 'USDCUSDT') {
+      } else if (symbol === 'USDC') {
         this.usdcPrice = price;
       }
     });
 
     this.binanceWebSocket.on('close', (code, reason) => {
       console.error('Binance WebSocket Closed:', code, reason);
+      this.wsConnected = false;
       this.reconnectBinance();
+    });
+
+    this.binanceWebSocket.on('error', (error) => {
+      console.error('Binance WebSocket Error:', error);
+      this.wsConnected = false;
     });
 
     this.binanceWebSocket.on('ping', () => {
@@ -209,6 +235,28 @@ export class PriceService {
       return error;
     } else {
       return 'An unknown error occurred';
+    }
+  }
+
+  private async fetchInitialPrices() {
+    try {
+      const response = await fetch(
+        'https://api.binance.com/api/v3/ticker/price?symbols=["SOLUSDT","USDCUSDT"]',
+      );
+      const prices = await response.json();
+
+      for (const price of prices) {
+        if (price.symbol === 'SOLUSDT') {
+          this.solPrice = parseFloat(price.price);
+        } else if (price.symbol === 'USDCUSDT') {
+          this.usdcPrice = parseFloat(price.price);
+        }
+      }
+    } catch (error) {
+      console.error(
+        'Error fetching initial prices:',
+        this.getErrorMessage(error),
+      );
     }
   }
 }

@@ -12,11 +12,11 @@ export class PriceController {
 
   @Get('sol')
   async getSolPrice(): Promise<number> {
-    return this.priceService.getSolPrice();
+    return await this.priceService.getSolPrice();
   }
 
   @Get('usdc')
   async getUsdcPrice(): Promise<number> {
-    return this.priceService.getUsdcPrice();
+    return await this.priceService.getUsdcPrice();
   }
 }

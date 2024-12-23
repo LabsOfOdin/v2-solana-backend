@@ -12,6 +12,7 @@ import { InvalidTokenError, InsufficientMarginError } from '../common/errors';
 import { MathService } from '../utils/math.service';
 import { UserService } from '../user/user.service';
 import { MarginBalance } from './entities/margin-balance.entity';
+import { SolanaService } from '../solana/solana.service';
 
 /**
  * @security checks:
@@ -33,6 +34,7 @@ export class MarginService {
     private readonly marginLockRepository: Repository<MarginLock>,
     private readonly userService: UserService,
     private readonly mathService: MathService,
+    private readonly solanaService: SolanaService,
   ) {}
 
   async depositMargin(
@@ -48,7 +50,12 @@ export class MarginService {
     }
 
     // Verify the transaction on Solana
-    await this.verifySolanaDeposit(txHash, amount, token);
+    await this.solanaService.verifyDeposit(
+      user.publicKey,
+      txHash,
+      amount,
+      token,
+    );
 
     // Get current margin balance
     const marginBalance = await this.userService.getMarginBalance(
@@ -283,20 +290,5 @@ export class MarginService {
     withdrawal.status = WithdrawalStatus.REJECTED;
     withdrawal.processingNotes = reason;
     return this.withdrawalRequestRepository.save(withdrawal);
-  }
-
-  // @audit - It's important to verify the solana deposit belongs to their account too.
-  private async verifySolanaDeposit(
-    txHash: string,
-    amount: string,
-    token: TokenType,
-  ): Promise<void> {
-    // TODO: Implement Solana transaction verification
-    // This should verify:
-    // 1. Transaction exists and is confirmed
-    // 2. Amount matches
-    // 3. Token type matches
-    // 4. Destination address is correct
-    throw new Error('Not implemented: Need to verify Solana deposit');
   }
 }

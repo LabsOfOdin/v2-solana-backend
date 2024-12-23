@@ -39,11 +39,8 @@ export class Market {
   @Column({ type: 'enum', enum: MarketStatus, default: MarketStatus.ACTIVE })
   status: MarketStatus;
 
-  @OneToMany(() => Position, (position) => position.openMarket)
-  openPositions: Position[];
-
-  @OneToMany(() => Position, (position) => position.closedMarket)
-  closedPositions: Position[];
+  @OneToMany(() => Position, (position) => position.market)
+  positions: Position[];
 
   @OneToMany(() => LimitOrder, (order) => order.market)
   openLimitOrders: LimitOrder[];

@@ -6,6 +6,7 @@ import { TradeModule } from '../trade/trade.module';
 import { UserModule } from '../user/user.module';
 import { PriceModule } from '../price/price.module';
 import { MathService } from '../utils/math.service';
+import { MarginModule } from 'src/margin/margin.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { MathService } from '../utils/math.service';
     TradeModule,
     UserModule,
     PriceModule,
+    MarginModule,
   ],
   providers: [LiquidationService, MathService],
   exports: [LiquidationService],

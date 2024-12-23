@@ -216,11 +216,7 @@ export class MarketService {
     }
 
     const result = { history };
-    await this.cacheManager.set<{ history: any[] }>(
-      cacheKey,
-      result,
-      5 * 60 * 1000,
-    ); // 5 minutes TTL
+    await this.cacheManager.set(cacheKey, result, 5 * 60 * 1000); // 5 minutes TTL
     return result;
   }
 

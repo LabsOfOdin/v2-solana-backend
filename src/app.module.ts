@@ -10,6 +10,7 @@ import { LPPosition } from './entities/lp-position.entity';
 import { Trade } from './entities/trade.entity';
 import { Market } from './entities/market.entity';
 import { LimitOrder } from './entities/limit-order.entity';
+import { MarginBalance } from './margin/entities/margin-balance.entity';
 import { TradeModule } from './trade/trade.module';
 import { UserModule } from './user/user.module';
 import { LiquidityModule } from './liquidity/liquidity.module';
@@ -31,7 +32,6 @@ import { MarginModule } from './margin/margin.module';
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
         ttl: 60 * 60 * 1000, // 1 hour default TTL
-        max: 100, // maximum number of items in cache
       }),
       inject: [ConfigService],
     }),
@@ -53,6 +53,7 @@ import { MarginModule } from './margin/margin.module';
           Trade,
           Market,
           LimitOrder,
+          MarginBalance,
         ],
         synchronize: configService.get('NODE_ENV') !== 'production',
         ssl: {

@@ -30,6 +30,7 @@ export class MarginController {
     },
   ) {
     const user = await this.userService.getUserByPublicKey(body.publicKey);
+
     if (!user) {
       throw new BadRequestException(
         `User with public key ${body.publicKey} not found`,
