@@ -111,8 +111,22 @@ export class PriceService {
       if (tokenData.extraInfo?.quotedPrice) {
         // Use the average of buy and sell prices if available
         const buyPrice = parseFloat(tokenData.extraInfo.quotedPrice.buyPrice);
-        const sellPrice = parseFloat(tokenData.extraInfo.quotedPrice.sellPrice);
-        priceInUsdc = (buyPrice + sellPrice) / 2;
+
+        // If 0, undefined or null, we don't have a sell price
+        const hasSellPrice =
+          tokenData.extraInfo.quotedPrice.sellPrice !== undefined &&
+          tokenData.extraInfo.quotedPrice.sellPrice !== null &&
+          tokenData.extraInfo.quotedPrice.sellPrice !== 0;
+
+        if (hasSellPrice) {
+          const sellPrice = parseFloat(
+            tokenData.extraInfo.quotedPrice.sellPrice || 0,
+          );
+
+          priceInUsdc = (buyPrice + sellPrice) / 2;
+        } else {
+          priceInUsdc = buyPrice;
+        }
       } else {
         // Fall back to derived price if quoted prices aren't available
         priceInUsdc = parseFloat(tokenData.price);

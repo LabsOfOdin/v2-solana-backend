@@ -6,11 +6,10 @@ import {
   Body,
   Param,
   UseGuards,
-  Request,
   Query,
 } from '@nestjs/common';
 import { MarketService } from './market.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { PinAuthGuard } from '../auth/pin-auth.guard';
 import { CreateMarketDto, UpdateMarketDto } from '../types/market.types';
 
 @Controller('markets')
@@ -52,18 +51,14 @@ export class MarketController {
   }
 
   @Post()
-  @UseGuards(JwtAuthGuard)
-  async createMarket(@Body() dto: CreateMarketDto, @Request() req) {
-    return this.marketService.createMarket(dto, req.user.publicKey);
+  @UseGuards(PinAuthGuard)
+  async createMarket(@Body() dto: CreateMarketDto) {
+    return this.marketService.createMarket(dto);
   }
 
   @Put(':id')
-  @UseGuards(JwtAuthGuard)
-  async updateMarket(
-    @Param('id') id: string,
-    @Body() dto: UpdateMarketDto,
-    @Request() req,
-  ) {
-    return this.marketService.updateMarket(id, dto, req.user.publicKey);
+  @UseGuards(PinAuthGuard)
+  async updateMarket(@Param('id') id: string, @Body() dto: UpdateMarketDto) {
+    return this.marketService.updateMarket(id, dto);
   }
 }

@@ -30,14 +30,7 @@ export class MarketService {
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
 
-  async createMarket(
-    dto: CreateMarketDto,
-    adminPublicKey: string,
-  ): Promise<Market> {
-    if (adminPublicKey !== getAdminWallet()) {
-      throw new UnauthorizedException('Only admin can create markets');
-    }
-
+  async createMarket(dto: CreateMarketDto): Promise<Market> {
     const existingMarket = await this.marketRepository.findOne({
       where: { symbol: dto.symbol },
     });
@@ -56,15 +49,7 @@ export class MarketService {
     return savedMarket;
   }
 
-  async updateMarket(
-    marketId: string,
-    dto: UpdateMarketDto,
-    adminPublicKey: string,
-  ): Promise<Market> {
-    if (adminPublicKey !== getAdminWallet()) {
-      throw new UnauthorizedException('Only admin can update markets');
-    }
-
+  async updateMarket(marketId: string, dto: UpdateMarketDto): Promise<Market> {
     const market = await this.getMarketById(marketId);
     Object.assign(market, dto);
 
@@ -113,9 +98,9 @@ export class MarketService {
     return market;
   }
 
-  async getAllMarkets(): Promise<Market[]> {
+  async getAllMarkets(): Promise<MarketInfo[]> {
     const cacheKey = 'markets:all';
-    const cachedMarkets = await this.cacheManager.get<Market[]>(cacheKey);
+    const cachedMarkets = await this.cacheManager.get<MarketInfo[]>(cacheKey);
 
     if (cachedMarkets) {
       return cachedMarkets;
@@ -125,8 +110,25 @@ export class MarketService {
       order: { symbol: 'ASC' },
     });
 
-    await this.cacheManager.set(cacheKey, markets, 60 * 60 * 1000); // 1 hour TTL
-    return markets;
+    // Transform markets into MarketInfo array
+    const marketsInfo = await Promise.all(
+      markets.map(async (market) => {
+        const lastPrice = await this.priceService.getCurrentPrice(market.id);
+        // Don't cache these as they are real-time values
+        const volume24h = '0';
+        const openInterest = '0';
+
+        return {
+          ...market,
+          lastPrice,
+          volume24h,
+          openInterest,
+        };
+      }),
+    );
+
+    await this.cacheManager.set(cacheKey, marketsInfo, 60 * 60 * 1000); // 1 hour TTL
+    return marketsInfo;
   }
 
   async getMarketInfo(marketId: string): Promise<MarketInfo> {
