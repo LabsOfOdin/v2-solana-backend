@@ -205,6 +205,7 @@ export class LimitOrderService {
         side: order.side,
         size: order.size,
         leverage: order.leverage,
+        token: order.token,
       };
 
       // Execute the trade

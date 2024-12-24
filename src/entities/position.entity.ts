@@ -67,6 +67,12 @@ export class Position {
   @Column({ type: 'decimal', precision: 40, scale: 18 })
   margin: string;
 
+  @Column({
+    type: 'enum',
+    enum: TokenType,
+  })
+  token: TokenType;
+
   @Column({ type: 'decimal', precision: 40, scale: 18, default: '0' })
   lockedMarginSOL: string;
 

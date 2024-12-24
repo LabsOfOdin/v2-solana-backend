@@ -25,13 +25,13 @@ export interface OrderRequest {
   side: OrderSide;
   size: string;
   leverage: string;
+  token: TokenType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
 }
 
 export interface LimitOrderRequest extends OrderRequest {
   price: string;
-  token: TokenType;
   type: OrderType;
 }
 

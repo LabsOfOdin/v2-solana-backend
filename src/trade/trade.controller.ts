@@ -13,13 +13,46 @@ export class TradeController {
     return this.tradeService.openPosition(orderRequest);
   }
 
-  @Post('position/:positionId/update')
-  async updatePosition(
+  @Post('position/:positionId/margin')
+  async editMargin(
     @Param('positionId') positionId: string,
-    @Body() updates: UpdatePositionRequest,
+    @Body() request: { marginDelta: string },
     @Query('publicKey') publicKey: string,
   ) {
-    return this.tradeService.updatePosition(positionId, publicKey, updates);
+    validatePublicKey(publicKey);
+    return this.tradeService.editMargin(
+      positionId,
+      publicKey,
+      request.marginDelta,
+    );
+  }
+
+  @Post('position/:positionId/stop-loss')
+  async editStopLoss(
+    @Param('positionId') positionId: string,
+    @Body() request: { stopLossPrice: string | null },
+    @Query('publicKey') publicKey: string,
+  ) {
+    validatePublicKey(publicKey);
+    return this.tradeService.editStopLoss(
+      positionId,
+      publicKey,
+      request.stopLossPrice,
+    );
+  }
+
+  @Post('position/:positionId/take-profit')
+  async editTakeProfit(
+    @Param('positionId') positionId: string,
+    @Body() request: { takeProfitPrice: string | null },
+    @Query('publicKey') publicKey: string,
+  ) {
+    validatePublicKey(publicKey);
+    return this.tradeService.editTakeProfit(
+      positionId,
+      publicKey,
+      request.takeProfitPrice,
+    );
   }
 
   @Post('position/:positionId/close')
