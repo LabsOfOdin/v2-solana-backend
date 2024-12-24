@@ -1,10 +1,6 @@
 import { Controller, Post, Body, Get, Param, Query } from '@nestjs/common';
 import { TradeService } from './trade.service';
-import {
-  OrderRequest,
-  UpdatePositionRequest,
-  PartialCloseRequest,
-} from '../types/trade.types';
+import { OrderRequest, UpdatePositionRequest } from '../types/trade.types';
 import { validatePublicKey } from 'src/common/validators';
 
 @Controller('trade')
@@ -26,25 +22,17 @@ export class TradeController {
     return this.tradeService.updatePosition(positionId, publicKey, updates);
   }
 
-  @Post('position/:positionId/partial-close')
-  async partialClosePosition(
-    @Param('positionId') positionId: string,
-    @Body() request: PartialCloseRequest,
-    @Query('publicKey') publicKey: string,
-  ) {
-    return this.tradeService.partialClosePosition(
-      positionId,
-      publicKey,
-      request,
-    );
-  }
-
   @Post('position/:positionId/close')
   async closePosition(
     @Param('positionId') positionId: string,
+    @Body() request: { sizeDelta: string },
     @Query('publicKey') publicKey: string,
   ) {
-    return this.tradeService.closePosition(positionId, publicKey);
+    return this.tradeService.closePosition(
+      positionId,
+      publicKey,
+      request.sizeDelta,
+    );
   }
 
   @Get('positions')

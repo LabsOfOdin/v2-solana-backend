@@ -214,24 +214,6 @@ export class MarginService {
     await this.marginLockRepository.remove(marginLock);
   }
 
-  async updateUnrealizedPnl(
-    userId: string,
-    token: TokenType,
-    pnl: string,
-  ): Promise<void> {
-    const marginBalance = await this.userService.getMarginBalance(
-      userId,
-      token,
-    );
-    await this.userService.updateMarginBalance(
-      userId,
-      token,
-      marginBalance.availableBalance,
-      marginBalance.lockedBalance,
-      pnl,
-    );
-  }
-
   async getBalance(userId: string, token: TokenType): Promise<MarginBalance> {
     return this.userService.getMarginBalance(userId, token);
   }

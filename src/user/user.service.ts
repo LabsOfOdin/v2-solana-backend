@@ -170,19 +170,4 @@ export class UserService {
     // Remove margin lock
     await this.marginLockRepository.delete({ tradeId });
   }
-
-  async updateUnrealizedPnl(
-    userId: string,
-    token: TokenType,
-    pnl: string,
-  ): Promise<void> {
-    const marginBalance = await this.getMarginBalance(userId, token);
-    await this.updateMarginBalance(
-      userId,
-      token,
-      marginBalance.availableBalance,
-      marginBalance.lockedBalance,
-      pnl,
-    );
-  }
 }

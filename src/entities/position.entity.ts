@@ -9,7 +9,7 @@ import {
 } from 'typeorm';
 import { User } from './user.entity';
 import { Market } from './market.entity';
-import { OrderSide, MarginType } from '../types/trade.types';
+import { OrderSide } from '../types/trade.types';
 import { TokenType } from '../margin/types/token.types';
 
 export enum PositionStatus {
@@ -33,6 +33,9 @@ export class Position {
   @Column({ type: 'uuid' })
   marketId: string;
 
+  @Column({ type: 'varchar', length: 20 })
+  symbol: string;
+
   @ManyToOne(() => Market)
   @JoinColumn({ name: 'marketId', referencedColumnName: 'id' })
   market: Market;
@@ -52,12 +55,6 @@ export class Position {
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   leverage: string;
 
-  @Column({
-    type: 'enum',
-    enum: MarginType,
-  })
-  marginType: MarginType;
-
   @Column({ type: 'decimal', precision: 40, scale: 18, nullable: true })
   stopLossPrice?: string;
 
@@ -67,12 +64,6 @@ export class Position {
   @Column({ type: 'decimal', precision: 40, scale: 18, nullable: true })
   trailingStopDistance?: string;
 
-  @Column({ type: 'decimal', precision: 40, scale: 18, nullable: true })
-  highestPrice?: string;
-
-  @Column({ type: 'decimal', precision: 40, scale: 18, nullable: true })
-  lowestPrice?: string;
-
   @Column({ type: 'decimal', precision: 40, scale: 18 })
   margin: string;
 
@@ -81,9 +72,6 @@ export class Position {
 
   @Column({ type: 'decimal', precision: 40, scale: 18, default: '0' })
   lockedMarginUSDC: string;
-
-  @Column({ type: 'decimal', precision: 40, scale: 18 })
-  unrealizedPnl: string;
 
   @Column({ type: 'decimal', precision: 40, scale: 18, nullable: true })
   realizedPnl?: string;

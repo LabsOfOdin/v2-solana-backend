@@ -1,6 +1,6 @@
 // Cache TTLs (in milliseconds)
 export const CACHE_TTL = {
-  POSITION: 30 * 1000, // 30 seconds
+  POSITION: 1 * 1000, // 1 seconds
   TRADE_HISTORY: 5 * 60 * 1000, // 5 minutes
   MARKET_INFO: 60 * 60 * 1000, // 1 hour
   FUNDING_HISTORY: 5 * 60 * 1000, // 5 minutes

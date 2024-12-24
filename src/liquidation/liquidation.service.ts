@@ -3,27 +3,22 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Position, PositionStatus } from '../entities/position.entity';
 import { PriceService } from '../price/price.service';
-import { TradeService } from '../trade/trade.service';
 import { MarginService } from '../margin/margin.service';
 import { MathService } from '../utils/math.service';
-import { OrderSide, MarginType } from '../types/trade.types';
+import { OrderSide } from '../types/trade.types';
 import { TokenType } from '../margin/types/token.types';
 
 @Injectable()
 export class LiquidationService {
   private readonly logger = new Logger(LiquidationService.name);
   private readonly checkInterval = 5000; // 5 seconds - more frequent than limit orders
-  private readonly maintenanceMarginRate = {
-    [MarginType.ISOLATED]: '0.05', // 5% for isolated
-    [MarginType.CROSS]: '0.03', // 3% for cross
-  };
+  private readonly maintenanceMarginRate = '0.05'; // 5% maintenance margin rate
   private readonly hourlyBorrowingRate = '0.0000125'; // 0.00125% per hour
 
   constructor(
     @InjectRepository(Position)
     private readonly positionRepository: Repository<Position>,
     private readonly priceService: PriceService,
-    private readonly tradeService: TradeService,
     private readonly marginService: MarginService,
     private readonly mathService: MathService,
   ) {
@@ -49,54 +44,50 @@ export class LiquidationService {
       throw new Error('Position not found');
     }
 
-    const currentPrice = await this.priceService.getCurrentPrice(
-      position.marketId,
-    );
-    return this.calculateLiquidationPrice(position, currentPrice);
+    return this.calculateLiquidationPrice(position);
   }
 
-  private calculateLiquidationPrice(
-    position: Position,
-    currentPrice: string,
-  ): string {
+  private async calculateLiquidationPrice(position: Position): Promise<string> {
     // Calculate total fees
     const totalFees = this.mathService.add(
       position.accumulatedFunding || '0',
       position.accumulatedBorrowingFee || '0',
     );
 
+    const solPrice = await this.priceService.getSolPrice();
+
+    // Calculate the USD value of the position's margin
+    const marginUSD = this.mathService.add(
+      this.mathService.multiply(position.lockedMarginSOL, solPrice),
+      position.lockedMarginUSDC,
+    );
+
     // Calculate effective margin (initial margin - fees)
-    const effectiveMargin = this.mathService.subtract(
-      position.margin,
-      totalFees,
-    );
+    const effectiveMargin = this.mathService.subtract(marginUSD, totalFees);
 
-    // Calculate position value
-    const positionValue = this.mathService.multiply(
-      position.size,
-      currentPrice,
-    );
+    // Position value is just size since it's already in USD
+    const positionValue = position.size;
 
-    // Calculate maintenance margin requirement
-    const maintenanceMarginRate =
-      this.maintenanceMarginRate[position.marginType];
-    const maintenanceMargin = this.mathService.multiply(
+    // Calculate required margin with maintenance requirement
+    const requiredMargin = this.mathService.multiply(
       positionValue,
-      maintenanceMarginRate,
+      this.maintenanceMarginRate,
     );
 
-    // For longs: liquidation_price = entry_price - (effective_margin - maintenance_margin) / size
-    // For shorts: liquidation_price = entry_price + (effective_margin - maintenance_margin) / size
-    const marginBuffer = this.mathService.subtract(
-      effectiveMargin,
-      maintenanceMargin,
+    // Calculate max loss percentage (effective margin - required margin) / position value
+    const maxLossPercentage = this.mathService.divide(
+      this.mathService.subtract(effectiveMargin, requiredMargin),
+      positionValue,
     );
-    const priceMove = this.mathService.divide(marginBuffer, position.size);
 
     if (position.side === OrderSide.LONG) {
-      return this.mathService.subtract(position.entryPrice, priceMove);
+      // For longs: liquidation_price = entry_price * (1 - maxLossPercentage)
+      const multiplier = this.mathService.subtract('1', maxLossPercentage);
+      return this.mathService.multiply(position.entryPrice, multiplier);
     } else {
-      return this.mathService.add(position.entryPrice, priceMove);
+      // For shorts: liquidation_price = entry_price * (1 + maxLossPercentage)
+      const multiplier = this.mathService.add('1', maxLossPercentage);
+      return this.mathService.multiply(position.entryPrice, multiplier);
     }
   }
 
@@ -104,10 +95,7 @@ export class LiquidationService {
     position: Position,
     currentPrice: string,
   ): Promise<boolean> {
-    const liquidationPrice = this.calculateLiquidationPrice(
-      position,
-      currentPrice,
-    );
+    const liquidationPrice = await this.calculateLiquidationPrice(position);
 
     if (position.side === OrderSide.LONG) {
       return this.mathService.compare(currentPrice, liquidationPrice) <= 0;
@@ -142,65 +130,27 @@ export class LiquidationService {
     }
   }
 
+  /**
+   * @audit Seems fishy. Why is there pnl calculation here?
+   * Should just nuke the margin from their account.
+   * We should also probably have something in the DB so we can track
+   * the funds we've earned from:
+   * - liquidation fees
+   * - borrowing fees
+   * - funding fees
+   * - position fees
+   */
   private async liquidatePosition(
     position: Position,
     currentPrice: string,
   ): Promise<void> {
     try {
-      // Calculate realized PnL
-      const realizedPnl = this.calculatePnl(
-        position.side,
-        position.size,
-        position.entryPrice,
-        currentPrice,
-      );
-
-      // Get SOL price to convert PnL
-      const solPrice = await this.priceService.getSolPrice();
-
-      // Distribute PnL proportionally to locked margins
-      const totalLockedUSD = this.mathService.add(
-        this.mathService.multiply(position.lockedMarginSOL, solPrice),
-        position.lockedMarginUSDC,
-      );
-
-      if (this.mathService.compare(position.lockedMarginSOL, '0') > 0) {
-        const solShare = this.mathService.divide(
-          this.mathService.multiply(position.lockedMarginSOL, solPrice),
-          totalLockedUSD,
-        );
-        const solPnL = this.mathService.divide(
-          this.mathService.multiply(realizedPnl, solShare),
-          solPrice,
-        );
-        await this.marginService.releaseMargin(
-          position.userId,
-          TokenType.SOL,
-          position.id,
-          solPnL,
-        );
-      }
-
-      if (this.mathService.compare(position.lockedMarginUSDC, '0') > 0) {
-        const usdcShare = this.mathService.divide(
-          position.lockedMarginUSDC,
-          totalLockedUSD,
-        );
-        const usdcPnL = this.mathService.multiply(realizedPnl, usdcShare);
-        await this.marginService.releaseMargin(
-          position.userId,
-          TokenType.USDC,
-          position.id,
-          usdcPnL,
-        );
-      }
-
       // Update position status
       await this.positionRepository.update(position.id, {
         status: PositionStatus.LIQUIDATED,
         closedAt: new Date(),
         closingPrice: currentPrice,
-        realizedPnl: realizedPnl,
+        realizedPnl: '0', // No PnL in liquidation - all margin is seized
       });
 
       this.logger.log(
@@ -210,20 +160,6 @@ export class LiquidationService {
       this.logger.error(`Failed to liquidate position ${position.id}:`, error);
       throw error;
     }
-  }
-
-  private calculatePnl(
-    side: OrderSide,
-    size: string,
-    entryPrice: string,
-    currentPrice: string,
-  ): string {
-    const priceDiff =
-      side === OrderSide.LONG
-        ? this.mathService.subtract(currentPrice, entryPrice)
-        : this.mathService.subtract(entryPrice, currentPrice);
-
-    return this.mathService.multiply(size, priceDiff);
   }
 
   private async updateBorrowingFees(): Promise<void> {

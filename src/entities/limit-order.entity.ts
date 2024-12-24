@@ -9,7 +9,7 @@ import {
 } from 'typeorm';
 import { User } from './user.entity';
 import { Market } from './market.entity';
-import { OrderSide, MarginType, OrderStatus } from '../types/trade.types';
+import { OrderSide, OrderStatus } from '../types/trade.types';
 import { TokenType } from '../margin/types/token.types';
 
 @Entity('limit_orders')
@@ -48,15 +48,12 @@ export class LimitOrder {
 
   @Column({
     type: 'enum',
-    enum: MarginType,
-  })
-  marginType: MarginType;
-
-  @Column({
-    type: 'enum',
     enum: TokenType,
   })
   token: TokenType;
+
+  @Column({ type: 'varchar', length: 255 })
+  symbol: string;
 
   @Column({ type: 'decimal', precision: 40, scale: 18 })
   requiredMargin: string;

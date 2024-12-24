@@ -7,15 +7,20 @@ import { UserModule } from '../user/user.module';
 import { PriceModule } from '../price/price.module';
 import { MathService } from '../utils/math.service';
 import { MarginModule } from '../margin/margin.module';
+import { Market } from '../entities/market.entity';
+import { LimitOrderController } from './limit-order.controller';
+import { EventsModule } from 'src/events/events.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([LimitOrder]),
+    TypeOrmModule.forFeature([LimitOrder, Market]),
     TradeModule,
     UserModule,
     PriceModule,
     MarginModule,
+    EventsModule,
   ],
+  controllers: [LimitOrderController],
   providers: [LimitOrderService, MathService],
   exports: [LimitOrderService],
 })

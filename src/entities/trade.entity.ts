@@ -9,7 +9,7 @@ import {
 import { User } from './user.entity';
 import { Position } from './position.entity';
 import { Market } from './market.entity';
-import { OrderSide, MarginType } from '../types/trade.types';
+import { OrderSide } from '../types/trade.types';
 
 @Entity('trades')
 export class Trade {
@@ -48,9 +48,6 @@ export class Trade {
 
   @Column({ type: 'decimal', precision: 40, scale: 20 })
   leverage: string;
-
-  @Column({ type: 'enum', enum: MarginType })
-  marginType: MarginType;
 
   @Column({ type: 'decimal', precision: 40, scale: 20, nullable: true })
   realizedPnl?: string;

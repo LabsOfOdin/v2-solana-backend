@@ -84,8 +84,8 @@ export class SolanaService {
           // For USDC transfers
           if (token === TokenType.USDC) {
             if (info.mint?.equals(this.USDC_MINT)) {
-              const amount = (Number(info.amount) / 1e6).toString(); // USDC has 6 decimals
-              if (amount === expectedAmount) {
+              const amount = Number(info.amount) / 1e6; // USDC has 6 decimals
+              if (Math.abs(amount - Number(expectedAmount)) < 1e-8) {
                 foundTransfer = true;
                 break;
               }
@@ -101,8 +101,8 @@ export class SolanaService {
       ) {
         const { type, info } = ix.parsed;
         if (type === 'transfer') {
-          const amount = (Number(info.lamports) / LAMPORTS_PER_SOL).toString();
-          if (amount === expectedAmount) {
+          const amount = Number(info.lamports) / LAMPORTS_PER_SOL;
+          if (Math.abs(amount - Number(expectedAmount)) < 1e-8) {
             foundTransfer = true;
             break;
           }

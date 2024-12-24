@@ -12,17 +12,10 @@ export enum OrderSide {
   SHORT = 'SHORT',
 }
 
-export enum MarginType {
-  ISOLATED = 'ISOLATED',
-  CROSS = 'CROSS',
-}
-
 export enum OrderStatus {
   OPEN = 'OPEN',
   FILLED = 'FILLED',
   CANCELLED = 'CANCELLED',
-  EXPIRED = 'EXPIRED',
-  PARTIALLY_FILLED = 'PARTIALLY_FILLED',
 }
 
 export interface OrderRequest {
@@ -32,7 +25,6 @@ export interface OrderRequest {
   side: OrderSide;
   size: string;
   leverage: string;
-  marginType?: MarginType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
 }
@@ -50,9 +42,9 @@ export interface UpdatePositionRequest {
 }
 
 export interface PartialCloseRequest {
-  size: string;
+  sizeDelta: string;
   price?: string;
-  type: OrderType;
+  type?: OrderType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
 }
@@ -66,7 +58,6 @@ export interface Trade {
   size: string;
   price: string;
   leverage: string;
-  marginType: MarginType;
   realizedPnl?: string;
   fee: string;
   createdAt: Date;
