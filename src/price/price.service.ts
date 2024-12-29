@@ -33,6 +33,13 @@ export class PriceService {
     interval: 'minute',
   });
 
+  // Store up to 5 minutes of data, or choose a suitable time period
+  private readonly TWAP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+  // Map each token address to an array of { timestamp, price }
+  private priceHistory: Map<string, { timestamp: number; price: number }[]> =
+    new Map();
+
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     @InjectRepository(Market)
@@ -52,7 +59,12 @@ export class PriceService {
     const market = await this.getMarketFromMarketId(marketId);
 
     const price = await this.getDexPrice(market.tokenAddress, market.symbol);
-    return price.toString();
+
+    this.updatePriceHistory(market.tokenAddress, price);
+
+    const twap = this.computeTwap(market.tokenAddress, price);
+
+    return twap.toString();
   }
 
   async getSolPrice(): Promise<number> {
@@ -183,8 +195,6 @@ export class PriceService {
     try {
       // Apply rate limiting
       await this.solanaLimiter.removeTokens(1);
-      // @TODO: Use websocket connection to get price instead
-      // await this.binanceLimiter.removeTokens(1);
 
       const jupiterResponse = await fetch(
         `${jupiterUrl}?ids=${tokenAddress}&showExtraInfo=true`,
@@ -303,6 +313,88 @@ export class PriceService {
    * ========================== Helper Functions ==========================
    */
 
+  private updatePriceHistory(tokenAddress: string, price: number): void {
+    const now = Date.now();
+    const history = this.priceHistory.get(tokenAddress) || [];
+
+    // Add the new data point
+    history.push({ timestamp: now, price });
+
+    // Remove old entries beyond TWAP_WINDOW_MS
+    const cutoff = now - this.TWAP_WINDOW_MS;
+    while (history.length && history[0].timestamp < cutoff) {
+      history.shift();
+    }
+
+    // Save updated history
+    this.priceHistory.set(tokenAddress, history);
+  }
+
+  /**
+   * @audit Adjust price history length in period of volatility, or on a per-market
+   * basis. If boolean flag is set (twapActivated), default to 5 mins.
+   */
+  private computeTwap(tokenAddress: string, fallbackPrice: number): number {
+    const history = this.priceHistory.get(tokenAddress) || [];
+    // If no history, return the freshly fetched 'fallbackPrice'
+    if (!history.length) {
+      return fallbackPrice;
+    }
+
+    this.filterOutliers(history);
+
+    let totalWeightedPrice = 0;
+    let totalDuration = 0;
+
+    for (let i = 0; i < history.length - 1; i++) {
+      const current = history[i];
+      const next = history[i + 1];
+      // How long 'current.price' was valid until the next timestamp
+      const durationMs = next.timestamp - current.timestamp;
+      totalWeightedPrice += current.price * durationMs;
+      totalDuration += durationMs;
+    }
+
+    // Weight the final data point from its timestamp to "now"
+    const lastEntry = history[history.length - 1];
+    const now = Date.now();
+    const lastDurationMs = now - lastEntry.timestamp;
+    totalWeightedPrice += lastEntry.price * lastDurationMs;
+    totalDuration += lastDurationMs;
+
+    // If totalDuration is 0 for some reason (e.g. only one sample with identical timestamps), fallback
+    if (totalDuration === 0) {
+      return fallbackPrice;
+    }
+
+    return totalWeightedPrice / totalDuration;
+  }
+
+  private filterOutliers(
+    history: { timestamp: number; price: number }[],
+  ): void {
+    // Calculate simple mean
+    const sum = history.reduce((acc, h) => acc + h.price, 0);
+    const mean = sum / history.length;
+
+    // Calculate sample standard deviation
+    const variance =
+      history.reduce((acc, h) => acc + Math.pow(h.price - mean, 2), 0) /
+      history.length;
+    const stdDev = Math.sqrt(variance);
+
+    // Define an outlier threshold (e.g., 3 standard deviations)
+    const lowerBound = mean - 3 * stdDev;
+    const upperBound = mean + 3 * stdDev;
+
+    // Filter in-place (remove outliers outside the bounds)
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].price < lowerBound || history[i].price > upperBound) {
+        history.splice(i, 1);
+      }
+    }
+  }
+
   private async getMarketFromMarketId(marketId: string): Promise<Market> {
     const cacheKey = `market-${marketId}`;
 
@@ -327,16 +419,6 @@ export class PriceService {
       );
       throw new Error(`Market with ID ${marketId} not found`);
     }
-  }
-
-  /**
-   * @dev Update this to instead calculate the funding rate based on
-   * the skew in the market. We can use the PRINT3R formula for this.
-   * Either create a funding service or move it to market service.
-   */
-  async calculateFundingRate(marketId: string): Promise<string> {
-    // Implement funding rate calculation based on mark price vs index price
-    throw new Error('Not implemented');
   }
 
   private getErrorMessage(error: unknown): string {
