@@ -5,7 +5,6 @@ import { LimitOrder } from '../entities/limit-order.entity';
 import { TradeModule } from '../trade/trade.module';
 import { UserModule } from '../user/user.module';
 import { PriceModule } from '../price/price.module';
-import { MathService } from '../utils/math.service';
 import { MarginModule } from '../margin/margin.module';
 import { Market } from '../entities/market.entity';
 import { LimitOrderController } from './limit-order.controller';
@@ -21,7 +20,7 @@ import { EventsModule } from 'src/events/events.module';
     EventsModule,
   ],
   controllers: [LimitOrderController],
-  providers: [LimitOrderService, MathService],
+  providers: [LimitOrderService],
   exports: [LimitOrderService],
 })
 export class LimitOrderModule {}

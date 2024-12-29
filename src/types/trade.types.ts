@@ -26,8 +26,10 @@ export interface OrderRequest {
   size: string;
   leverage: string;
   token: TokenType;
+  positionId?: string;
   stopLossPrice?: string;
   takeProfitPrice?: string;
+  trailingStopDistance?: string;
 }
 
 export interface LimitOrderRequest extends OrderRequest {
@@ -44,7 +46,6 @@ export interface UpdatePositionRequest {
 export interface PartialCloseRequest {
   sizeDelta: string;
   price?: string;
-  type?: OrderType;
   stopLossPrice?: string;
   takeProfitPrice?: string;
 }
@@ -61,6 +62,5 @@ export interface Trade {
   realizedPnl?: string;
   fee: string;
   createdAt: Date;
-  type: OrderType;
   isPartialClose?: boolean;
 }

@@ -2,11 +2,10 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
-  UnauthorizedException,
   Inject,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between } from 'typeorm';
+import { Repository } from 'typeorm';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Market } from '../entities/market.entity';
@@ -16,19 +15,29 @@ import {
   MarketInfo,
   MarketStats,
 } from '../types/market.types';
-import { MathService } from '../utils/math.service';
 import { PriceService } from '../price/price.service';
-import { getAdminWallet } from 'src/common/config';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { add } from 'src/lib/math';
 
 @Injectable()
 export class MarketService {
   constructor(
     @InjectRepository(Market)
     private readonly marketRepository: Repository<Market>,
-    private readonly mathService: MathService,
     private readonly priceService: PriceService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
+
+  @Cron(CronExpression.EVERY_MINUTE) // Runs every minute
+  async updateFundingRates(): Promise<void> {
+    const markets = await this.marketRepository.find();
+
+    await Promise.all(
+      markets.map((market) => this.calculateFundingRate(market)),
+    );
+
+    console.log('Funding rates updated for all markets');
+  }
 
   async createMarket(dto: CreateMarketDto): Promise<Market> {
     const existingMarket = await this.marketRepository.findOne({
@@ -41,7 +50,14 @@ export class MarketService {
 
     const market = this.marketRepository.create({
       ...dto,
+      longOpenInterest: '0',
+      shortOpenInterest: '0',
       fundingRate: '0',
+      fundingRateVelocity: '0',
+      maxFundingRate: dto.maxFundingRate || '0.0003',
+      maxFundingVelocity: dto.maxFundingVelocity || '0.01',
+      borrowingRate: dto.borrowingRate || '0.0003',
+      lastUpdatedTimestamp: Date.now(),
     });
 
     const savedMarket = await this.marketRepository.save(market);
@@ -51,6 +67,27 @@ export class MarketService {
 
   async updateMarket(marketId: string, dto: UpdateMarketDto): Promise<Market> {
     const market = await this.getMarketById(marketId);
+
+    if (dto.longOpenInterest) {
+      market.longOpenInterest = dto.longOpenInterest;
+    }
+
+    if (dto.shortOpenInterest) {
+      market.shortOpenInterest = dto.shortOpenInterest;
+    }
+
+    if (dto.borrowingRate) {
+      market.borrowingRate = dto.borrowingRate;
+    }
+
+    if (dto.maxFundingRate) {
+      market.maxFundingRate = dto.maxFundingRate;
+    }
+
+    if (dto.maxFundingVelocity) {
+      market.maxFundingVelocity = dto.maxFundingVelocity;
+    }
+
     Object.assign(market, dto);
 
     const updatedMarket = await this.marketRepository.save(market);
@@ -131,19 +168,22 @@ export class MarketService {
     return marketsInfo;
   }
 
+  /**
+   * @audit Need to implement 24h volume and open interest.
+   * Also add 24hr high and low.
+   */
   async getMarketInfo(marketId: string): Promise<MarketInfo> {
     const market = await this.getMarketById(marketId);
     const lastPrice = await this.priceService.getCurrentPrice(marketId);
 
-    // Don't cache this as it includes real-time price
-    const volume24h = '0';
-    const openInterest = '0';
-
     return {
       ...market,
       lastPrice,
-      volume24h,
-      openInterest,
+      volume24h: '0',
+      openInterest: '0',
+      borrowingRate: market.borrowingRate, // Include the borrowing rate
+      longOpenInterest: market.longOpenInterest,
+      shortOpenInterest: market.shortOpenInterest,
     };
   }
 
@@ -160,18 +200,26 @@ export class MarketService {
 
   async getFundingRate(marketId: string): Promise<{
     currentRate: string;
-    nextFundingTime: Date;
     estimatedRate: string;
+    unrecordedFunding: string;
   }> {
     const market = await this.getMarketById(marketId);
-    const nextFundingTime = this.getNextFundingTime();
-    const estimatedRate = await this.calculateEstimatedFundingRate(market);
 
-    // Don't cache as funding rates change frequently
+    // Calculate current funding rate
+    const currentFundingRate = await this.calculateFundingRate(market);
+
+    // Calculate unrecorded funding
+    const unrecordedFunding = await this.calculateUnrecordedFunding(market);
+
+    // Compute estimated rate
+    const estimatedRate = (
+      Number(currentFundingRate) + Number(unrecordedFunding)
+    ).toFixed(8);
+
     return {
-      currentRate: market.fundingRate,
-      nextFundingTime,
+      currentRate: currentFundingRate,
       estimatedRate,
+      unrecordedFunding,
     };
   }
 
@@ -223,56 +271,79 @@ export class MarketService {
   }
 
   async getMarketStats(marketId: string): Promise<MarketStats> {
-    const cacheKey = `market:stats:${marketId}`;
-    const cachedStats = await this.cacheManager.get<MarketStats>(cacheKey);
-
-    if (cachedStats) {
-      return cachedStats;
-    }
-
     const market = await this.getMarketById(marketId);
     const currentPrice = await this.priceService.getCurrentPrice(marketId);
 
     const stats = {
-      price: currentPrice,
+      markPrice: currentPrice,
       priceChange24h: '0',
       volume24h: '0',
       openInterest: '0',
       fundingRate: market.fundingRate,
-      nextFundingTime: this.getNextFundingTime(),
-      markPrice: currentPrice,
-      indexPrice: currentPrice,
       maxLeverage: market.maxLeverage,
       liquidationFee: '0.025',
-      tradingFee: market.takerFee,
-      borrowingRate: '0.0003',
+      borrowingRate: market.borrowingRate,
+      longOpenInterest: market.longOpenInterest,
+      shortOpenInterest: market.shortOpenInterest,
     };
 
-    await this.cacheManager.set(cacheKey, stats, 60 * 1000); // 1 minute TTL
+    await this.cacheManager.set(`market:stats:${marketId}`, stats, 60 * 1000); // 1 minute TTL
     return stats;
   }
 
-  private getNextFundingTime(): Date {
-    const now = new Date();
-    const nextFunding = new Date(now);
-    const hours = now.getUTCHours();
-    const nextFundingHour = Math.ceil(hours / 8) * 8;
-
-    nextFunding.setUTCHours(nextFundingHour, 0, 0, 0);
-
-    if (nextFunding <= now) {
-      nextFunding.setTime(nextFunding.getTime() + 8 * 60 * 60 * 1000);
-    }
-
-    return nextFunding;
-  }
-
   private async calculateFundingRate(market: Market): Promise<string> {
-    return '0.0001';
+    const now = Date.now();
+    const timeElapsed = (now - market.lastUpdatedTimestamp) / 1000; // in seconds
+
+    // Calculate skew and skewScale dynamically
+    const longOI = Number(market.longOpenInterest);
+    const shortOI = Number(market.shortOpenInterest);
+    const skew = longOI - shortOI;
+    const skewScale = longOI + shortOI;
+
+    // Avoid division by zero
+    const proportionalSkew = skewScale > 0 ? skew / skewScale : 0;
+
+    // Scale maxFundingVelocity to the elapsed time
+    const maxVelocityPerSecond = Number(market.maxFundingVelocity) / 86400;
+    const clampedVelocity =
+      Math.min(maxVelocityPerSecond * timeElapsed, Math.abs(proportionalSkew)) *
+      Math.sign(proportionalSkew);
+
+    const newFundingRateVelocity =
+      Number(market.fundingRateVelocity) + clampedVelocity;
+
+    // Scale maxFundingRate to the elapsed time
+    const maxRatePerSecond = Number(market.maxFundingRate) / 86400;
+    let currentFundingRate =
+      Number(market.fundingRate) +
+      newFundingRateVelocity * (timeElapsed / 86400);
+
+    // Clamp funding rate
+    currentFundingRate = Math.max(
+      -maxRatePerSecond * timeElapsed,
+      Math.min(maxRatePerSecond * timeElapsed, currentFundingRate),
+    );
+
+    // Update market properties
+    market.fundingRateVelocity = newFundingRateVelocity.toString();
+    market.lastUpdatedTimestamp = now;
+
+    await this.marketRepository.save(market);
+
+    return currentFundingRate.toFixed(8); // Return a string with 8 decimal places
   }
 
-  private async calculateEstimatedFundingRate(market: Market): Promise<string> {
-    return '0.0001';
+  private async calculateUnrecordedFunding(market: Market): Promise<string> {
+    const now = Date.now();
+    const timeElapsed = (now - market.lastUpdatedTimestamp) / 1000; // in seconds
+
+    const currentFundingRate = await this.calculateFundingRate(market);
+    const avgFundingRate =
+      -(Number(market.fundingRate) + Number(currentFundingRate)) / 2;
+
+    const unrecordedFunding = avgFundingRate * (timeElapsed / 86400); // seconds in a day
+    return unrecordedFunding.toFixed(8); // Return a string with 8 decimal places
   }
 
   private async invalidateMarketCache(market?: Market): Promise<void> {
@@ -287,5 +358,33 @@ export class MarketService {
     }
 
     await Promise.all(keys.map((key) => this.cacheManager.del(key)));
+  }
+
+  /**
+   * @warning CLEARS FEES TO 0! MAKE SURE TO NOTE FEES DOWN IN
+   * ORDER TO HANDLE DISTRIBUTION OF REWARDS!!
+   */
+  async claimFees(marketId: string): Promise<{ claimedAmount: string }> {
+    const market = await this.getMarketById(marketId);
+    const claimedAmount = market.unclaimedFees;
+
+    // Reset unclaimed fees to 0
+    await this.marketRepository.update(marketId, {
+      unclaimedFees: '0',
+    });
+
+    await this.invalidateMarketCache();
+    return { claimedAmount };
+  }
+
+  async addTradingFees(marketId: string, fees: string): Promise<void> {
+    const market = await this.getMarketById(marketId);
+
+    await this.marketRepository.update(marketId, {
+      cumulativeFees: add(market.cumulativeFees, fees),
+      unclaimedFees: add(market.unclaimedFees, fees),
+    });
+
+    await this.invalidateMarketCache();
   }
 }

@@ -2,25 +2,30 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Position, PositionStatus } from '../entities/position.entity';
+import { Market } from '../entities/market.entity';
 import { PriceService } from '../price/price.service';
-import { MarginService } from '../margin/margin.service';
-import { MathService } from '../utils/math.service';
 import { OrderSide } from '../types/trade.types';
 import { TokenType } from '../margin/types/token.types';
+import { MarginService } from '../margin/margin.service';
+import { MarketService } from '../market/market.service';
+import { EventsService } from '../events/events.service';
+import { add, compare, divide, multiply, subtract } from 'src/lib/math';
 
 @Injectable()
 export class LiquidationService {
   private readonly logger = new Logger(LiquidationService.name);
   private readonly checkInterval = 5000; // 5 seconds - more frequent than limit orders
   private readonly maintenanceMarginRate = '0.05'; // 5% maintenance margin rate
-  private readonly hourlyBorrowingRate = '0.0000125'; // 0.00125% per hour
 
   constructor(
     @InjectRepository(Position)
     private readonly positionRepository: Repository<Position>,
+    @InjectRepository(Market)
+    private readonly marketRepository: Repository<Market>,
     private readonly priceService: PriceService,
+    private readonly eventsService: EventsService,
     private readonly marginService: MarginService,
-    private readonly mathService: MathService,
+    private readonly marketService: MarketService,
   ) {
     this.startMonitoring();
   }
@@ -49,7 +54,7 @@ export class LiquidationService {
 
   private async calculateLiquidationPrice(position: Position): Promise<string> {
     // Calculate total fees
-    const totalFees = this.mathService.add(
+    const totalFees = add(
       position.accumulatedFunding || '0',
       position.accumulatedBorrowingFee || '0',
     );
@@ -57,37 +62,34 @@ export class LiquidationService {
     const solPrice = await this.priceService.getSolPrice();
 
     // Calculate the USD value of the position's margin
-    const marginUSD = this.mathService.add(
-      this.mathService.multiply(position.lockedMarginSOL, solPrice),
+    const marginUSD = add(
+      multiply(position.lockedMarginSOL, solPrice),
       position.lockedMarginUSDC,
     );
 
     // Calculate effective margin (initial margin - fees)
-    const effectiveMargin = this.mathService.subtract(marginUSD, totalFees);
+    const effectiveMargin = subtract(marginUSD, totalFees);
 
     // Position value is just size since it's already in USD
     const positionValue = position.size;
 
     // Calculate required margin with maintenance requirement
-    const requiredMargin = this.mathService.multiply(
-      positionValue,
-      this.maintenanceMarginRate,
-    );
+    const requiredMargin = multiply(positionValue, this.maintenanceMarginRate);
 
     // Calculate max loss percentage (effective margin - required margin) / position value
-    const maxLossPercentage = this.mathService.divide(
-      this.mathService.subtract(effectiveMargin, requiredMargin),
+    const maxLossPercentage = divide(
+      subtract(effectiveMargin, requiredMargin),
       positionValue,
     );
 
     if (position.side === OrderSide.LONG) {
       // For longs: liquidation_price = entry_price * (1 - maxLossPercentage)
-      const multiplier = this.mathService.subtract('1', maxLossPercentage);
-      return this.mathService.multiply(position.entryPrice, multiplier);
+      const multiplier = subtract('1', maxLossPercentage);
+      return multiply(position.entryPrice, multiplier);
     } else {
       // For shorts: liquidation_price = entry_price * (1 + maxLossPercentage)
-      const multiplier = this.mathService.add('1', maxLossPercentage);
-      return this.mathService.multiply(position.entryPrice, multiplier);
+      const multiplier = add('1', maxLossPercentage);
+      return multiply(position.entryPrice, multiplier);
     }
   }
 
@@ -98,9 +100,9 @@ export class LiquidationService {
     const liquidationPrice = await this.calculateLiquidationPrice(position);
 
     if (position.side === OrderSide.LONG) {
-      return this.mathService.compare(currentPrice, liquidationPrice) <= 0;
+      return compare(currentPrice, liquidationPrice) <= 0;
     } else {
-      return this.mathService.compare(currentPrice, liquidationPrice) >= 0;
+      return compare(currentPrice, liquidationPrice) >= 0;
     }
   }
 
@@ -179,28 +181,51 @@ export class LiquidationService {
           (1000 * 60 * 60);
 
         if (hoursSinceLastUpdate >= 1) {
+          const market = await this.marketRepository.findOne({
+            where: { id: position.marketId },
+          });
+          if (!market) {
+            throw new Error('Market not found');
+          }
+
           const currentPrice = await this.priceService.getCurrentPrice(
             position.marketId,
           );
-          const positionValue = this.mathService.multiply(
-            position.size,
-            currentPrice,
-          );
+          const positionValue = multiply(position.size, currentPrice);
 
           // Calculate borrowing fee for the elapsed hours
           const hoursToCharge = Math.floor(hoursSinceLastUpdate);
-          const borrowingFee = this.mathService.multiply(
+          const borrowingFeeUsd = multiply(
             positionValue,
-            this.mathService.multiply(
-              this.hourlyBorrowingRate,
-              hoursToCharge.toString(),
-            ),
+            multiply(market.borrowingRate, hoursToCharge.toString()),
           );
 
-          // Update accumulated borrowing fee
-          position.accumulatedBorrowingFee = this.mathService.add(
+          // Get token price for conversion
+          const tokenPrice =
+            position.token === TokenType.SOL
+              ? await this.priceService.getSolPrice()
+              : await this.priceService.getUsdcPrice();
+
+          // Convert fee to token amount
+          const feeInToken = divide(borrowingFeeUsd, tokenPrice);
+
+          // Deduct fee from user's margin balance
+          await this.marginService.deductMargin(
+            position.userId,
+            position.token,
+            feeInToken,
+          );
+
+          // Add fee to market's tracking
+          /**
+           * @audit Need to distinguish between trading fees in SOL and USDC
+           */
+          await this.marketService.addTradingFees(market.id, feeInToken);
+
+          // Update position's accumulated borrowing fee and last update time
+          position.accumulatedBorrowingFee = add(
             position.accumulatedBorrowingFee,
-            borrowingFee,
+            feeInToken,
           );
           position.lastBorrowingFeeUpdate = new Date(
             position.lastBorrowingFeeUpdate.getTime() +
@@ -208,6 +233,16 @@ export class LiquidationService {
           );
 
           await this.positionRepository.save(position);
+
+          // Emit fee charged event
+          this.eventsService.emitBorrowingFeeCharged({
+            userId: position.userId,
+            positionId: position.id,
+            marketId: market.id,
+            feeUsd: feeInToken,
+            feeToken: feeInToken,
+            token: position.token,
+          });
         }
       } catch (error) {
         this.logger.error(

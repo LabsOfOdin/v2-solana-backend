@@ -11,19 +11,29 @@ import { Position, PositionStatus } from '../entities/position.entity';
 import { Market } from '../entities/market.entity';
 import { PriceService } from '../price/price.service';
 import { LiquidityService } from '../liquidity/liquidity.service';
-import { MathService } from '../utils/math.service';
 import { CacheService } from '../utils/cache.service';
 import { CACHE_TTL, getCacheKey } from '../constants/cache.constants';
-import {
-  OrderRequest,
-  OrderSide,
-  Trade,
-  OrderType,
-} from '../types/trade.types';
+import { OrderRequest, OrderSide, Trade } from '../types/trade.types';
 import { Trade as TradeEntity } from '../entities/trade.entity';
 import { MarginService } from '../margin/margin.service';
 import { TokenType } from '../margin/types/token.types';
 import { EventsService } from '../events/events.service';
+import { LIQUIDITY_SCALAR, TRADING_FEE } from '../common/config';
+import { MarketService } from '../market/market.service';
+import { MarginBalance } from 'src/margin/entities/margin-balance.entity';
+import {
+  abs,
+  add,
+  compare,
+  divide,
+  isNegative,
+  isPositive,
+  isZero,
+  lt,
+  min,
+  multiply,
+  subtract,
+} from 'src/lib/math';
 
 @Injectable()
 export class TradeService {
@@ -38,13 +48,18 @@ export class TradeService {
     private readonly marketRepository: Repository<Market>,
     private readonly priceService: PriceService,
     private readonly liquidityService: LiquidityService,
-    private readonly mathService: MathService,
+
     private readonly cacheService: CacheService,
     private readonly marginService: MarginService,
     private readonly eventsService: EventsService,
+    private readonly marketService: MarketService,
   ) {
     this.startMonitoring();
   }
+
+  // ----------------------------------------------------------------
+  // 1) Position Monitoring
+  // ----------------------------------------------------------------
 
   private async startMonitoring() {
     setInterval(async () => {
@@ -55,135 +70,6 @@ export class TradeService {
         // Don't throw here as this is a background process
       }
     }, this.checkInterval);
-  }
-
-  async openPosition(orderRequest: OrderRequest): Promise<boolean> {
-    try {
-      if (!orderRequest || !orderRequest.marketId || !orderRequest.userId) {
-        throw new BadRequestException('Invalid order request parameters');
-      }
-
-      if (orderRequest.size === '0') {
-        throw new BadRequestException('Size must be greater than 0');
-      }
-
-      // Get market details to get the symbol
-      const market = await this.marketRepository.findOne({
-        where: { id: orderRequest.marketId },
-      });
-
-      if (!market) {
-        throw new NotFoundException('Market not found');
-      }
-
-      const leverage = parseFloat(orderRequest.leverage);
-
-      if (leverage === 0 || leverage > parseFloat(market.maxLeverage)) {
-        throw new BadRequestException('Invalid Leverage');
-      }
-
-      // 1. Get current market price and calculate entry price with slippage
-      const marketPrice = await this.priceService
-        .getCurrentPrice(orderRequest.marketId)
-        .catch(() => {
-          throw new InternalServerErrorException(
-            'Failed to fetch market price',
-          );
-        });
-
-      const entryPrice = this.calculateEntryPrice(marketPrice, orderRequest);
-
-      // 2. Calculate required margin in USD
-      const requiredMarginUSD =
-        await this.calculateRequiredMargin(orderRequest);
-
-      // 3. Get margin balance for the specified token
-      const marginBalance = await this.marginService
-        .getBalance(orderRequest.userId, orderRequest.token)
-        .catch(() => {
-          throw new InternalServerErrorException(
-            'Failed to fetch margin balance',
-          );
-        });
-
-      // 4. Convert balance to USD if token is SOL
-      let availableMarginUSD = marginBalance.availableBalance;
-      if (orderRequest.token === TokenType.SOL) {
-        const solPrice = await this.priceService.getSolPrice();
-        availableMarginUSD = this.mathService.multiply(
-          marginBalance.availableBalance,
-          solPrice,
-        );
-      }
-
-      // 5. Check if user has enough margin
-      if (this.mathService.compare(availableMarginUSD, requiredMarginUSD) < 0) {
-        throw new Error('Insufficient margin');
-      }
-
-      // 6. Calculate amount to lock in the specified token
-      let amountToLock = requiredMarginUSD;
-      if (orderRequest.token === TokenType.SOL) {
-        const solPrice = await this.priceService.getSolPrice();
-        amountToLock = this.mathService.divide(requiredMarginUSD, solPrice);
-      }
-
-      // 7. Lock margin
-      const positionId = crypto.randomUUID();
-      try {
-        await this.marginService.lockMargin(
-          orderRequest.userId,
-          orderRequest.token,
-          amountToLock,
-          positionId,
-        );
-      } catch (error) {
-        throw new InternalServerErrorException('Failed to lock margin');
-      }
-
-      // 8. Check liquidity pool capacity
-      try {
-        await this.liquidityService.validateLiquidityForTrade(orderRequest);
-      } catch (error) {
-        throw new BadRequestException('Insufficient liquidity for trade');
-      }
-
-      // 9. Create position
-      const position = await this.positionRepository.save(
-        this.positionRepository.create({
-          id: positionId,
-          userId: orderRequest.userId,
-          marketId: orderRequest.marketId,
-          symbol: market.symbol,
-          side: orderRequest.side,
-          size: orderRequest.size,
-          entryPrice,
-          leverage: orderRequest.leverage,
-          stopLossPrice: orderRequest.stopLossPrice,
-          takeProfitPrice: orderRequest.takeProfitPrice,
-          margin: requiredMarginUSD,
-          token: orderRequest.token,
-          lockedMarginSOL:
-            orderRequest.token === TokenType.SOL ? amountToLock : '0',
-          lockedMarginUSDC:
-            orderRequest.token === TokenType.USDC ? amountToLock : '0',
-          status: PositionStatus.OPEN,
-        }),
-      );
-
-      // Emit position update event
-      this.eventsService.emitPositionsUpdate();
-
-      return position.status === PositionStatus.OPEN;
-    } catch (error) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof InternalServerErrorException
-      ) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to open position');
-    }
   }
 
   private async checkPositionsForStopLossAndTakeProfit(): Promise<void> {
@@ -200,12 +86,14 @@ export class TradeService {
           position.marketId,
         );
 
-        if (this.shouldTriggerStopLoss(position, currentPrice)) {
+        if (this.shouldTriggerOrderClose(position, currentPrice, 'stopLoss')) {
           await this.closePosition(position.id, position.userId, position.size);
           continue;
         }
 
-        if (this.shouldTriggerTakeProfit(position, currentPrice)) {
+        if (
+          this.shouldTriggerOrderClose(position, currentPrice, 'takeProfit')
+        ) {
           await this.closePosition(position.id, position.userId, position.size);
         }
       } catch (error) {
@@ -214,117 +102,203 @@ export class TradeService {
     }
   }
 
-  /**
-   * @audit To implement.
-   */
-  private async updateTrailingStop(
+  private shouldTriggerOrderClose(
     position: Position,
     currentPrice: string,
-  ): Promise<void> {
-    if (!position.trailingStopDistance) return;
-
-    if (position.side === OrderSide.LONG) {
-      // For longs, update stop loss based on current price and trailing distance
-      const newStopPrice = this.mathService.subtract(
-        currentPrice,
-        position.trailingStopDistance,
-      );
-      if (
-        !position.stopLossPrice ||
-        this.mathService.compare(newStopPrice, position.stopLossPrice) > 0
-      ) {
-        await this.positionRepository.update(position.id, {
-          stopLossPrice: newStopPrice,
-        });
-      }
-    } else {
-      // For shorts, update stop loss based on current price and trailing distance
-      const newStopPrice = this.mathService.add(
-        currentPrice,
-        position.trailingStopDistance,
-      );
-      if (
-        !position.stopLossPrice ||
-        this.mathService.compare(newStopPrice, position.stopLossPrice) < 0
-      ) {
-        await this.positionRepository.update(position.id, {
-          stopLossPrice: newStopPrice,
-        });
-      }
-    }
-  }
-
-  private shouldTriggerStopLoss(
-    position: Position,
-    currentPrice: string,
+    type: 'stopLoss' | 'takeProfit',
   ): boolean {
-    if (!position.stopLossPrice) return false;
+    const triggerPrice =
+      type === 'stopLoss' ? position.stopLossPrice : position.takeProfitPrice;
+    if (!triggerPrice) return false;
+
+    const comparison = compare(currentPrice, triggerPrice);
 
     if (position.side === OrderSide.LONG) {
-      return (
-        this.mathService.compare(currentPrice, position.stopLossPrice) <= 0
-      );
+      // Long position:
+      // - Stop Loss: Close when price falls to/below stop price
+      // - Take Profit: Close when price rises to/above take profit price
+      return type === 'stopLoss' ? comparison <= 0 : comparison >= 0;
     } else {
-      return (
-        this.mathService.compare(currentPrice, position.stopLossPrice) >= 0
-      );
+      // Short position:
+      // - Stop Loss: Close when price rises to/above stop price
+      // - Take Profit: Close when price falls to/below take profit price
+      return type === 'stopLoss' ? comparison >= 0 : comparison <= 0;
     }
   }
 
-  private shouldTriggerTakeProfit(
-    position: Position,
-    currentPrice: string,
-  ): boolean {
-    if (!position.takeProfitPrice) return false;
-
-    if (position.side === OrderSide.LONG) {
-      return (
-        this.mathService.compare(currentPrice, position.takeProfitPrice) >= 0
-      );
-    } else {
-      return (
-        this.mathService.compare(currentPrice, position.takeProfitPrice) <= 0
-      );
-    }
-  }
-
-  private validateStopLossPrice(
+  private validateOrderPrice(
     side: OrderSide,
     entryPrice: string,
-    stopLossPrice: string,
-  ) {
-    if (side === OrderSide.LONG) {
-      if (this.mathService.compare(stopLossPrice, entryPrice) >= 0) {
-        throw new Error(
-          'Stop loss price must be below entry price for long positions',
-        );
-      }
-    } else {
-      if (this.mathService.compare(stopLossPrice, entryPrice) <= 0) {
-        throw new Error(
-          'Stop loss price must be above entry price for short positions',
-        );
-      }
+    price: string,
+    type: 'stopLoss' | 'takeProfit',
+  ): void {
+    const comparison = compare(price, entryPrice);
+    const isInvalid =
+      side === OrderSide.LONG
+        ? type === 'stopLoss'
+          ? comparison >= 0
+          : comparison <= 0
+        : type === 'stopLoss'
+          ? comparison <= 0
+          : comparison >= 0;
+
+    if (isInvalid) {
+      const direction =
+        side === OrderSide.LONG
+          ? type === 'stopLoss'
+            ? 'below'
+            : 'above'
+          : type === 'stopLoss'
+            ? 'above'
+            : 'below';
+
+      throw new Error(
+        `${type === 'stopLoss' ? 'Stop loss' : 'Take profit'} price must be ${direction} entry price for ${side.toLowerCase()} positions`,
+      );
     }
   }
 
-  private validateTakeProfitPrice(
-    side: OrderSide,
-    entryPrice: string,
-    takeProfitPrice: string,
-  ) {
-    if (side === OrderSide.LONG) {
-      if (this.mathService.compare(takeProfitPrice, entryPrice) <= 0) {
-        throw new Error(
-          'Take profit price must be above entry price for long positions',
+  // ----------------------------------------------------------------
+  // 2) Position Interaction
+  // ----------------------------------------------------------------
+
+  async openPosition(orderRequest: OrderRequest): Promise<boolean> {
+    try {
+      // 1. Validate basic input parameters
+      if (!orderRequest || !orderRequest.marketId || !orderRequest.userId) {
+        throw new BadRequestException('Invalid order request parameters');
+      }
+      if (orderRequest.size === '0') {
+        throw new BadRequestException('Size must be greater than 0');
+      }
+
+      // 2. Fetch market
+      let market: Market;
+      try {
+        market = await this.marketRepository.findOne({
+          where: { id: orderRequest.marketId },
+        });
+      } catch (error) {
+        throw new InternalServerErrorException(
+          `Failed to fetch market: ${error.message}`,
         );
       }
-    } else {
-      if (this.mathService.compare(takeProfitPrice, entryPrice) >= 0) {
-        throw new Error(
-          'Take profit price must be below entry price for short positions',
+      if (!market) {
+        throw new NotFoundException('Market not found');
+      }
+
+      // 3. Validate leverage
+      const leverage = parseFloat(orderRequest.leverage);
+      if (leverage === 0 || leverage > parseFloat(market.maxLeverage)) {
+        throw new BadRequestException('Invalid Leverage');
+      }
+
+      // 4. Fetch current market price
+      let marketPrice: string;
+      try {
+        marketPrice = await this.priceService.getCurrentPrice(
+          orderRequest.marketId,
+        );
+      } catch {
+        throw new InternalServerErrorException('Failed to fetch market price');
+      }
+
+      // 5. Calculate entry price with slippage/price impact
+      const entryPrice = await this.calculateEntryPrice(
+        marketPrice,
+        orderRequest,
+      );
+
+      // 6. Calculate required margin (USD)
+      const requiredMarginUSD =
+        await this.calculateRequiredMargin(orderRequest);
+
+      // 7. Get user's margin balance
+      let marginBalance: MarginBalance;
+      try {
+        marginBalance = await this.marginService.getBalance(
+          orderRequest.userId,
+          orderRequest.token,
+        );
+      } catch {
+        throw new InternalServerErrorException(
+          'Failed to fetch margin balance',
         );
       }
+
+      const solPrice = await this.priceService.getSolPrice();
+
+      // 8. Convert available balance to USD if token is SOL
+      let availableMarginUSD = marginBalance.availableBalance;
+      const isSol = orderRequest.token === TokenType.SOL;
+      if (isSol) {
+        availableMarginUSD = multiply(availableMarginUSD, solPrice);
+      }
+
+      // 9. Check if user has enough margin
+      if (compare(availableMarginUSD, requiredMarginUSD) < 0) {
+        throw new Error('Insufficient margin');
+      }
+
+      // 10. Calculate amount to lock (token-based)
+      let amountToLock = requiredMarginUSD;
+      if (isSol) {
+        amountToLock = divide(requiredMarginUSD, solPrice);
+      }
+
+      // 11. Lock margin
+      const positionId = crypto.randomUUID();
+      try {
+        await this.marginService.lockMargin(
+          orderRequest.userId,
+          orderRequest.token,
+          amountToLock,
+          positionId,
+        );
+      } catch {
+        throw new InternalServerErrorException('Failed to lock margin');
+      }
+
+      // 12. Validate liquidity
+      try {
+        await this.liquidityService.validateLiquidityForTrade(orderRequest);
+      } catch {
+        throw new BadRequestException('Insufficient liquidity for trade');
+      }
+
+      // 13. Create position
+      const position = await this.positionRepository.save(
+        this.positionRepository.create({
+          id: positionId,
+          userId: orderRequest.userId,
+          marketId: orderRequest.marketId,
+          symbol: market.symbol,
+          side: orderRequest.side,
+          size: orderRequest.size,
+          entryPrice,
+          leverage: orderRequest.leverage,
+          stopLossPrice: orderRequest.stopLossPrice,
+          takeProfitPrice: orderRequest.takeProfitPrice,
+          margin: requiredMarginUSD,
+          token: orderRequest.token,
+          lockedMarginSOL: isSol ? amountToLock : '0',
+          lockedMarginUSDC: !isSol ? amountToLock : '0',
+          status: PositionStatus.OPEN,
+        }),
+      );
+
+      // 14. Emit position update event
+      this.eventsService.emitPositionsUpdate();
+
+      return position.status === PositionStatus.OPEN;
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof InternalServerErrorException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to open position');
     }
   }
 
@@ -334,59 +308,47 @@ export class TradeService {
     sizeDelta: string,
   ): Promise<Position> {
     try {
-      // Input validation
-      if (!positionId) {
-        throw new BadRequestException('Position ID is required');
-      }
-      if (!userId) {
-        throw new BadRequestException('User ID is required');
-      }
-      if (!sizeDelta) {
-        throw new BadRequestException('Size delta is required');
-      }
+      // 1. Validate inputs
+      if (!positionId) throw new BadRequestException('Position ID is required');
+      if (!userId) throw new BadRequestException('User ID is required');
+      if (!sizeDelta) throw new BadRequestException('Size delta is required');
 
-      // Get position with error handling
+      // 2. Retrieve position
       let position: Position;
       try {
         position = await this.getPosition(positionId);
       } catch (error) {
-        if (error instanceof NotFoundException) {
-          throw error;
-        }
+        if (error instanceof NotFoundException) throw error;
         throw new InternalServerErrorException(
           `Failed to fetch position: ${error.message}`,
         );
       }
 
-      // Authorization check
+      // 3. Authorization check
       if (position.userId !== userId) {
         throw new UnauthorizedException(
           'Not authorized to modify this position',
         );
       }
 
-      // Validate close size
-      if (this.mathService.compare(sizeDelta, position.size) > 0) {
+      // 4. Validate close size
+      const closeSizeComparison = compare(sizeDelta, position.size);
+      if (closeSizeComparison > 0) {
         throw new BadRequestException(
           'Close size must be less than or equal to position size',
         );
       }
+      const isPartialClose = closeSizeComparison < 0;
+      const isFullClose = closeSizeComparison === 0;
 
-      // Get current price with error handling
-      let currentPrice: string;
-      try {
-        currentPrice = await this.priceService.getCurrentPrice(
-          position.marketId,
-        );
-      } catch (error) {
-        throw new InternalServerErrorException(
-          `Failed to fetch current price: ${error.message}`,
-        );
-      }
+      // 5. Fetch current price
+      let currentPrice: string = await this.priceService.getCurrentPrice(
+        position.marketId,
+      );
 
-      const remainingSize = this.mathService.subtract(position.size, sizeDelta);
+      const remainingSize = subtract(position.size, sizeDelta);
 
-      // Calculate realized PnL for the closed portion in USD
+      // 6. Calculate realized PnL
       const realizedPnlUSD = this.calculatePnl(
         position.side,
         sizeDelta,
@@ -394,71 +356,62 @@ export class TradeService {
         currentPrice,
       );
 
-      // Get SOL price with error handling
-      let solPrice: number;
-      try {
-        solPrice = await this.priceService.getSolPrice();
-      } catch (error) {
-        throw new InternalServerErrorException(
-          `Failed to fetch SOL price: ${error.message}`,
-        );
-      }
+      // 7. Fetch SOL price
+      const solPrice = await this.priceService.getSolPrice();
 
-      // Calculate proportion of position being closed
-      const closeProportion = this.mathService.divide(sizeDelta, position.size);
-
-      // Calculate margin to release for each token
-      const solMarginToRelease = this.mathService.multiply(
+      // 8. Calculate proportions for margin release
+      const closeProportion = divide(sizeDelta, position.size);
+      const solMarginToRelease = multiply(
         position.lockedMarginSOL,
         closeProportion,
       );
-      const usdcMarginToRelease = this.mathService.multiply(
+      const usdcMarginToRelease = multiply(
         position.lockedMarginUSDC,
         closeProportion,
       );
 
-      // Calculate total locked value in USD for PnL distribution
-      const totalLockedUSD = this.mathService.add(
-        this.mathService.multiply(solMarginToRelease, solPrice),
+      // Total locked value in USD (for distributing PnL across tokens)
+      const totalLockedUSD = add(
+        multiply(solMarginToRelease, solPrice),
         usdcMarginToRelease,
       );
 
-      // Release proportional margin with PnL for each token
+      // 9. Release margin (and re-lock remaining if partial close)
       try {
-        if (this.mathService.compare(solMarginToRelease, '0') > 0) {
-          const solShare = this.mathService.divide(
-            this.mathService.multiply(solMarginToRelease, solPrice),
+        // For SOL
+        if (compare(solMarginToRelease, '0') > 0) {
+          const solShare = divide(
+            multiply(solMarginToRelease, solPrice),
             totalLockedUSD,
           );
-          const solPnL = this.mathService.divide(
-            this.mathService.multiply(realizedPnlUSD, solShare),
-            solPrice,
-          );
+          const solPnL = divide(multiply(realizedPnlUSD, solShare), solPrice);
 
-          // For partial closes, create a new margin lock for the remaining amount
-          if (this.mathService.compare(sizeDelta, position.size) < 0) {
-            const remainingSolMargin = this.mathService.subtract(
+          // Partial close
+          if (isPartialClose) {
+            const remainingSolMargin = subtract(
               position.lockedMarginSOL,
               solMarginToRelease,
             );
-            // First release the entire original lock
+
+            // Release entire original lock
             await this.marginService.releaseMargin(
               position.userId,
               TokenType.SOL,
               position.id,
               position.lockedMarginSOL,
             );
-            // Then create a new lock for the remaining amount
-            if (this.mathService.compare(remainingSolMargin, '0') > 0) {
+
+            // Re-lock remaining
+            if (compare(remainingSolMargin, '0') > 0) {
               await this.marginService.lockMargin(
                 position.userId,
                 TokenType.SOL,
                 remainingSolMargin,
-                crypto.randomUUID(), // Generate new position ID for the remaining lock
+                position.id,
               );
             }
           } else {
-            // For full closes, just release the margin as before
+            // Full close
             await this.marginService.releaseMargin(
               position.userId,
               TokenType.SOL,
@@ -468,37 +421,37 @@ export class TradeService {
           }
         }
 
-        if (this.mathService.compare(usdcMarginToRelease, '0') > 0) {
-          const usdcShare = this.mathService.divide(
-            usdcMarginToRelease,
-            totalLockedUSD,
-          );
-          const usdcPnL = this.mathService.multiply(realizedPnlUSD, usdcShare);
+        // For USDC
+        if (compare(usdcMarginToRelease, '0') > 0) {
+          const usdcShare = divide(usdcMarginToRelease, totalLockedUSD);
+          const usdcPnL = multiply(realizedPnlUSD, usdcShare);
 
-          // For partial closes, create a new margin lock for the remaining amount
-          if (this.mathService.compare(sizeDelta, position.size) < 0) {
-            const remainingUsdcMargin = this.mathService.subtract(
+          // Partial close
+          if (isPartialClose) {
+            const remainingUsdcMargin = subtract(
               position.lockedMarginUSDC,
               usdcMarginToRelease,
             );
-            // First release the entire original lock
+
+            // Release entire original lock
             await this.marginService.releaseMargin(
               position.userId,
               TokenType.USDC,
               position.id,
               position.lockedMarginUSDC,
             );
-            // Then create a new lock for the remaining amount
-            if (this.mathService.compare(remainingUsdcMargin, '0') > 0) {
+
+            // Re-lock remaining
+            if (compare(remainingUsdcMargin, '0') > 0) {
               await this.marginService.lockMargin(
                 position.userId,
                 TokenType.USDC,
                 remainingUsdcMargin,
-                crypto.randomUUID(), // Generate new position ID for the remaining lock
+                position.id,
               );
             }
           } else {
-            // For full closes, just release the margin as before
+            // Full close
             await this.marginService.releaseMargin(
               position.userId,
               TokenType.USDC,
@@ -513,10 +466,10 @@ export class TradeService {
         );
       }
 
+      // 10. Update position in DB
       let updatedPosition: Position;
       try {
-        // If closing entire position
-        if (this.mathService.compare(sizeDelta, position.size) === 0) {
+        if (isFullClose) {
           updatedPosition = await this.positionRepository.save({
             ...position,
             status: PositionStatus.CLOSED,
@@ -525,21 +478,20 @@ export class TradeService {
             realizedPnl: realizedPnlUSD,
           });
         } else {
-          // Update position for partial close
           updatedPosition = await this.positionRepository.save({
             ...position,
             size: remainingSize,
-            lockedMarginSOL: this.mathService.subtract(
+            lockedMarginSOL: subtract(
               position.lockedMarginSOL,
               solMarginToRelease,
             ),
-            lockedMarginUSDC: this.mathService.subtract(
+            lockedMarginUSDC: subtract(
               position.lockedMarginUSDC,
               usdcMarginToRelease,
             ),
-            margin: this.mathService.subtract(
+            margin: subtract(
               position.margin,
-              this.mathService.multiply(position.margin, closeProportion),
+              multiply(position.margin, closeProportion),
             ),
           });
         }
@@ -549,7 +501,7 @@ export class TradeService {
         );
       }
 
-      // Record the trade
+      // 11. Record the trade
       try {
         await this.recordTrade({
           id: crypto.randomUUID(),
@@ -564,9 +516,7 @@ export class TradeService {
           realizedPnl: realizedPnlUSD,
           fee: this.calculateFee(sizeDelta, currentPrice),
           createdAt: new Date(),
-          type: OrderType.MARKET,
-          isPartialClose:
-            this.mathService.compare(sizeDelta, position.size) < 0,
+          isPartialClose,
         });
       } catch (error) {
         throw new InternalServerErrorException(
@@ -574,17 +524,15 @@ export class TradeService {
         );
       }
 
-      // Emit position update event
+      // 12. Emit position update event (non-critical)
       try {
         this.eventsService.emitPositionsUpdate();
       } catch (error) {
         console.error('Failed to emit position update:', error);
-        // Don't throw here as it's not critical
       }
 
       return updatedPosition;
     } catch (error) {
-      // Log the full error for debugging
       console.error('Error in closePosition:', error);
 
       if (
@@ -595,11 +543,594 @@ export class TradeService {
       ) {
         throw error;
       }
+
       throw new InternalServerErrorException(
         `Failed to close position: ${error.message}`,
       );
     }
   }
+
+  async editStopLoss(
+    positionId: string,
+    userId: string,
+    stopLossPrice: string | null,
+  ): Promise<Position> {
+    try {
+      const position = await this.getPosition(positionId);
+
+      if (!position) {
+        throw new NotFoundException(`Position ${positionId} not found`);
+      }
+
+      if (position.userId !== userId) {
+        throw new UnauthorizedException(
+          'Not authorized to modify this position',
+        );
+      }
+
+      if (position.status !== PositionStatus.OPEN) {
+        throw new BadRequestException(
+          'Cannot edit stop loss of a closed position',
+        );
+      }
+
+      // If stopLossPrice is null, we're removing the stop loss
+      if (stopLossPrice !== null) {
+        try {
+          this.validateOrderPrice(
+            position.side,
+            position.entryPrice,
+            stopLossPrice,
+            'stopLoss',
+          );
+        } catch (error) {
+          throw new BadRequestException(error.message);
+        }
+      }
+
+      // Update position
+      const updatedPosition = await this.positionRepository.save({
+        ...position,
+        stopLossPrice,
+      });
+
+      await this.invalidatePositionCache(positionId, userId);
+      this.eventsService.emitPositionsUpdate();
+
+      return updatedPosition;
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof UnauthorizedException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to edit stop loss');
+    }
+  }
+
+  async editTakeProfit(
+    positionId: string,
+    userId: string,
+    takeProfitPrice: string | null,
+  ): Promise<Position> {
+    try {
+      const position = await this.getPosition(positionId);
+
+      if (!position) {
+        throw new NotFoundException(`Position ${positionId} not found`);
+      }
+
+      if (position.userId !== userId) {
+        throw new UnauthorizedException(
+          'Not authorized to modify this position',
+        );
+      }
+
+      if (position.status !== PositionStatus.OPEN) {
+        throw new BadRequestException(
+          'Cannot edit take profit of a closed position',
+        );
+      }
+
+      // If takeProfitPrice is null, we're removing the take profit
+      if (takeProfitPrice !== null) {
+        try {
+          this.validateOrderPrice(
+            position.side,
+            position.entryPrice,
+            takeProfitPrice,
+            'takeProfit',
+          );
+        } catch (error) {
+          throw new BadRequestException(error.message);
+        }
+      }
+
+      // Update position
+      const updatedPosition = await this.positionRepository.save({
+        ...position,
+        takeProfitPrice,
+      });
+
+      await this.invalidatePositionCache(positionId, userId);
+      this.eventsService.emitPositionsUpdate();
+
+      return updatedPosition;
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof UnauthorizedException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to edit take profit');
+    }
+  }
+
+  async editMargin(
+    positionId: string,
+    userId: string,
+    marginDelta: string,
+  ): Promise<Position> {
+    try {
+      const position = await this.getPosition(positionId);
+
+      if (!position) {
+        throw new NotFoundException(`Position ${positionId} not found`);
+      }
+
+      if (position.userId !== userId) {
+        throw new UnauthorizedException(
+          'Not authorized to modify this position',
+        );
+      }
+
+      if (position.status !== PositionStatus.OPEN) {
+        throw new BadRequestException(
+          'Cannot edit margin of a closed position',
+        );
+      }
+
+      const market = await this.marketRepository.findOne({
+        where: { id: position.marketId },
+      });
+
+      if (!market) {
+        throw new NotFoundException('Market not found');
+      }
+
+      const newMargin = add(position.margin, marginDelta);
+
+      // Check if withdrawal would exceed max leverage
+      if (compare(marginDelta, '0') < 0) {
+        const newLeverage = divide(position.size, newMargin);
+        if (compare(newLeverage, market.maxLeverage) > 0) {
+          throw new BadRequestException(
+            'Withdrawal would exceed maximum leverage',
+          );
+        }
+      } else {
+        // Check if deposit would go below 1x leverage
+        const newLeverage = divide(position.size, newMargin);
+        if (compare(newLeverage, '1') < 0) {
+          throw new BadRequestException(
+            'Deposit would result in leverage below 1x',
+          );
+        }
+
+        // Check if user has sufficient margin for deposit
+        const [solBalance, usdcBalance] = await Promise.all([
+          this.marginService.getBalance(userId, TokenType.SOL),
+          this.marginService.getBalance(userId, TokenType.USDC),
+        ]);
+
+        const solPrice = await this.priceService.getSolPrice();
+        const solBalanceInUSD = multiply(solBalance.availableBalance, solPrice);
+        const totalAvailableUSD = add(
+          solBalanceInUSD,
+          usdcBalance.availableBalance,
+        );
+
+        if (compare(totalAvailableUSD, marginDelta) < 0) {
+          throw new BadRequestException(
+            'Insufficient margin available for deposit',
+          );
+        }
+      }
+
+      // Calculate proportions for SOL and USDC based on current locked amounts
+      const totalLockedUSD = add(
+        multiply(
+          position.lockedMarginSOL,
+          await this.priceService.getSolPrice(),
+        ),
+        position.lockedMarginUSDC,
+      );
+
+      const solProportion = divide(
+        multiply(
+          position.lockedMarginSOL,
+          await this.priceService.getSolPrice(),
+        ),
+        totalLockedUSD,
+      );
+
+      const solPrice = await this.priceService.getSolPrice();
+      const marginDeltaSOL = divide(
+        multiply(marginDelta, solProportion),
+        solPrice,
+      );
+      const marginDeltaUSDC = multiply(
+        marginDelta,
+        subtract('1', solProportion),
+      );
+
+      // Handle margin adjustments
+      if (compare(marginDelta, '0') > 0) {
+        // Deposit
+        if (compare(marginDeltaSOL, '0') > 0) {
+          await this.marginService.lockMargin(
+            userId,
+            TokenType.SOL,
+            marginDeltaSOL,
+            positionId,
+          );
+        }
+        if (compare(marginDeltaUSDC, '0') > 0) {
+          await this.marginService.lockMargin(
+            userId,
+            TokenType.USDC,
+            marginDeltaUSDC,
+            positionId,
+          );
+        }
+      } else {
+        // Withdrawal
+        if (compare(marginDeltaSOL, '0') < 0) {
+          await this.marginService.releaseMargin(
+            userId,
+            TokenType.SOL,
+            positionId,
+            abs(marginDeltaSOL),
+          );
+        }
+        if (compare(marginDeltaUSDC, '0') < 0) {
+          await this.marginService.releaseMargin(
+            userId,
+            TokenType.USDC,
+            positionId,
+            abs(marginDeltaUSDC),
+          );
+        }
+      }
+
+      // Update position
+      const updatedPosition = await this.positionRepository.save({
+        ...position,
+        margin: newMargin,
+        lockedMarginSOL: add(position.lockedMarginSOL, marginDeltaSOL),
+        lockedMarginUSDC: add(position.lockedMarginUSDC, marginDeltaUSDC),
+      });
+
+      await this.invalidatePositionCache(positionId, userId);
+      this.eventsService.emitPositionsUpdate();
+
+      return updatedPosition;
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof UnauthorizedException ||
+        error instanceof BadRequestException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to edit position margin');
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // 3) Helper Functions
+  // ----------------------------------------------------------------
+
+  private async calculateEntryPrice(
+    marketPrice: string,
+    order: OrderRequest,
+  ): Promise<string> {
+    try {
+      if (!marketPrice || !order) {
+        throw new BadRequestException(
+          'Market price and order details are required',
+        );
+      }
+
+      // Get market details
+      const market = await this.marketRepository.findOne({
+        where: { id: order.marketId },
+      });
+
+      if (!market) {
+        throw new NotFoundException('Market not found');
+      }
+
+      // Calculate price impact
+      const priceImpact = await this.calculatePriceImpact(order, market);
+
+      // Calculate slippage
+      const slippagePercentage = this.calculateSlippage(order.size);
+      const slippageMultiplier =
+        order.side === OrderSide.LONG
+          ? add('1', slippagePercentage)
+          : subtract('1', slippagePercentage);
+
+      // Apply both price impact and slippage
+      const impactedPrice = multiply(marketPrice, add('1', priceImpact));
+      return multiply(impactedPrice, slippageMultiplier);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to calculate entry price');
+    }
+  }
+
+  private async calculatePriceImpact(
+    order: OrderRequest,
+    market: Market,
+  ): Promise<string> {
+    try {
+      // Calculate skew and OI
+      const initialSkew = subtract(
+        market.longOpenInterest,
+        market.shortOpenInterest,
+      );
+      const initialTotalOI = add(
+        market.longOpenInterest,
+        market.shortOpenInterest,
+      );
+
+      // Calculate updated state after trade
+      const updatedLongOI =
+        order.side === OrderSide.LONG
+          ? add(market.longOpenInterest, order.size)
+          : market.longOpenInterest;
+      const updatedShortOI =
+        order.side === OrderSide.SHORT
+          ? add(market.shortOpenInterest, order.size)
+          : market.shortOpenInterest;
+      const updatedSkew = subtract(updatedLongOI, updatedShortOI);
+      const updatedTotalOI = add(updatedLongOI, updatedShortOI);
+
+      // Check if skew flips direction
+      const skewFlipped =
+        (isNegative(initialSkew) && isPositive(updatedSkew)) ||
+        (isPositive(initialSkew) && isNegative(updatedSkew));
+
+      let priceImpactUsd: string;
+
+      if (skewFlipped) {
+        const equilibriumSize = abs(initialSkew);
+        const sizeToEquilibrium = min(order.size, equilibriumSize);
+        const remainingSize = subtract(order.size, sizeToEquilibrium);
+        const equilibriumTotalOI = add(initialTotalOI, sizeToEquilibrium);
+
+        // Calculate positive impact up to equilibrium
+        const positiveImpact = this.calculateImpactComponent(
+          sizeToEquilibrium,
+          '0',
+          initialSkew,
+          initialTotalOI,
+          equilibriumTotalOI,
+          this.getAvailableOI(
+            market,
+            order.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
+          ),
+          LIQUIDITY_SCALAR,
+        );
+
+        // Calculate negative impact beyond equilibrium (if any)
+        const negativeImpact = isZero(remainingSize)
+          ? '0'
+          : this.calculateImpactComponent(
+              remainingSize,
+              updatedSkew,
+              '0',
+              equilibriumTotalOI,
+              updatedTotalOI,
+              this.getAvailableOI(market, order.side),
+              LIQUIDITY_SCALAR,
+            );
+
+        priceImpactUsd = subtract(positiveImpact, negativeImpact);
+      } else {
+        priceImpactUsd = this.calculateImpactComponent(
+          order.size,
+          updatedSkew,
+          initialSkew,
+          initialTotalOI,
+          updatedTotalOI,
+          this.getAvailableOI(market, order.side),
+          LIQUIDITY_SCALAR,
+        );
+      }
+
+      // Handle impact pool
+      const finalImpactUsd =
+        order.side === OrderSide.LONG
+          ? multiply(priceImpactUsd, '-1')
+          : priceImpactUsd;
+
+      // Update impact pool and return capped impact
+      if (isPositive(finalImpactUsd)) {
+        const cappedImpact = min(finalImpactUsd, market.impactPool);
+        await this.marketRepository.update(market.id, {
+          impactPool: subtract(market.impactPool, cappedImpact),
+        });
+        return cappedImpact;
+      }
+
+      await this.marketRepository.update(market.id, {
+        impactPool: add(market.impactPool, abs(finalImpactUsd)),
+      });
+      return finalImpactUsd;
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException(
+        'Failed to calculate price impact',
+      );
+    }
+  }
+
+  // E.g $5 size, 2x leverage = $2.5 margin
+  private async calculateRequiredMargin(order: OrderRequest): Promise<string> {
+    try {
+      if (!order.size || !order.leverage) {
+        throw new BadRequestException(
+          'Size and leverage are required for margin calculation',
+        );
+      }
+
+      if (compare(order.leverage, '0') <= 0) {
+        throw new BadRequestException('Leverage must be greater than 0');
+      }
+
+      return divide(order.size, order.leverage);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException(
+        'Failed to calculate required margin',
+      );
+    }
+  }
+
+  private calculateImpactComponent(
+    sizeDeltaUsd: string,
+    updatedSkew: string,
+    initialSkew: string,
+    initialTotalOI: string,
+    updatedTotalOI: string,
+    availableOI: string,
+    priceImpactScalar: string,
+  ): string {
+    if (isZero(updatedTotalOI)) return '0';
+
+    // Calculate skew factor
+    const skewFactor = isZero(initialTotalOI)
+      ? divide(abs(updatedSkew), updatedTotalOI)
+      : subtract(
+          divide(abs(initialSkew), initialTotalOI),
+          divide(abs(updatedSkew), updatedTotalOI),
+        );
+
+    let priceImpactUsd = multiply(sizeDeltaUsd, skewFactor);
+
+    // Apply liquidity factor (minimum 1%)
+    let liquidityFactor = divide(sizeDeltaUsd, availableOI);
+    if (lt(liquidityFactor, '0.01')) {
+      liquidityFactor = '0.01';
+    }
+
+    return multiply(
+      multiply(priceImpactUsd, liquidityFactor),
+      priceImpactScalar,
+    );
+  }
+
+  private calculatePnl(
+    side: OrderSide,
+    size: string,
+    entryPrice: string,
+    currentPrice: string,
+  ): string {
+    try {
+      if (!side || !size || !entryPrice || !currentPrice) {
+        throw new BadRequestException(
+          'Missing required parameters for PnL calculation',
+        );
+      }
+
+      const priceDiff =
+        side === OrderSide.LONG
+          ? subtract(currentPrice, entryPrice)
+          : subtract(entryPrice, currentPrice);
+
+      return multiply(size, priceDiff);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to calculate PnL');
+    }
+  }
+
+  private calculateSlippage(size: string): string {
+    try {
+      if (!size) {
+        throw new BadRequestException(
+          'Size is required for slippage calculation',
+        );
+      }
+
+      return min('0.01', divide(size, '1000000'));
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to calculate slippage');
+    }
+  }
+
+  private calculateFee(size: string, price: string): string {
+    try {
+      if (!size || !price) {
+        throw new BadRequestException(
+          'Size and price are required for fee calculation',
+        );
+      }
+
+      const notionalValue = multiply(size, price);
+      return multiply(notionalValue, '0.0005'); // 0.05% fee
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to calculate fee');
+    }
+  }
+
+  async recordTrade(trade: Trade): Promise<void> {
+    try {
+      if (!trade || !trade.positionId || !trade.userId) {
+        throw new BadRequestException('Invalid trade data');
+      }
+
+      await this.tradeRepository
+        .save(this.tradeRepository.create(trade))
+        .catch(() => {
+          throw new InternalServerErrorException('Failed to save trade');
+        });
+
+      await this.invalidatePositionCache(trade.positionId, trade.userId);
+    } catch (error) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof InternalServerErrorException
+      ) {
+        throw error;
+      }
+      throw new InternalServerErrorException('Failed to record trade');
+    }
+  }
+
+  // ----------------------------------------------------------------
+  // 4) Getter Functions
+  // ----------------------------------------------------------------
 
   async getPosition(positionId: string): Promise<Position> {
     try {
@@ -675,143 +1206,13 @@ export class TradeService {
     }
   }
 
-  // E.g $5 size, 2x leverage = $2.5 margin
-  private async calculateRequiredMargin(order: OrderRequest): Promise<string> {
-    try {
-      if (!order.size || !order.leverage) {
-        throw new BadRequestException(
-          'Size and leverage are required for margin calculation',
-        );
-      }
-
-      if (this.mathService.compare(order.leverage, '0') <= 0) {
-        throw new BadRequestException('Leverage must be greater than 0');
-      }
-
-      return this.mathService.divide(order.size, order.leverage);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException(
-        'Failed to calculate required margin',
-      );
-    }
-  }
-
-  private calculateEntryPrice(
-    marketPrice: string,
-    order: OrderRequest,
-  ): string {
-    try {
-      if (!marketPrice || !order) {
-        throw new BadRequestException(
-          'Market price and order details are required',
-        );
-      }
-
-      const slippagePercentage = this.calculateSlippage(order.size);
-      const slippageMultiplier =
-        order.side === OrderSide.LONG
-          ? this.mathService.add('1', slippagePercentage)
-          : this.mathService.subtract('1', slippagePercentage);
-
-      return this.mathService.multiply(marketPrice, slippageMultiplier);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate entry price');
-    }
-  }
-
-  private calculatePnl(
-    side: OrderSide,
-    size: string,
-    entryPrice: string,
-    currentPrice: string,
-  ): string {
-    try {
-      if (!side || !size || !entryPrice || !currentPrice) {
-        throw new BadRequestException(
-          'Missing required parameters for PnL calculation',
-        );
-      }
-
-      const priceDiff =
-        side === OrderSide.LONG
-          ? this.mathService.subtract(currentPrice, entryPrice)
-          : this.mathService.subtract(entryPrice, currentPrice);
-
-      return this.mathService.multiply(size, priceDiff);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate PnL');
-    }
-  }
-
-  private calculateSlippage(size: string): string {
-    try {
-      if (!size) {
-        throw new BadRequestException(
-          'Size is required for slippage calculation',
-        );
-      }
-
-      return this.mathService.min(
-        '0.01',
-        this.mathService.divide(size, '1000000'),
-      );
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate slippage');
-    }
-  }
-
-  private calculateFee(size: string, price: string): string {
-    try {
-      if (!size || !price) {
-        throw new BadRequestException(
-          'Size and price are required for fee calculation',
-        );
-      }
-
-      const notionalValue = this.mathService.multiply(size, price);
-      return this.mathService.multiply(notionalValue, '0.0005'); // 0.05% fee
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate fee');
-    }
-  }
-
-  async recordTrade(trade: Trade): Promise<void> {
-    try {
-      if (!trade || !trade.positionId || !trade.userId) {
-        throw new BadRequestException('Invalid trade data');
-      }
-
-      await this.tradeRepository
-        .save(this.tradeRepository.create(trade))
-        .catch(() => {
-          throw new InternalServerErrorException('Failed to save trade');
-        });
-
-      await this.invalidatePositionCache(trade.positionId, trade.userId);
-    } catch (error) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof InternalServerErrorException
-      ) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to record trade');
-    }
+  private getAvailableOI(market: Market, side: OrderSide): string {
+    return subtract(
+      market.maxLeverage,
+      side === OrderSide.LONG
+        ? market.longOpenInterest
+        : market.shortOpenInterest,
+    );
   }
 
   async getPositionTrades(positionId: string): Promise<TradeEntity[]> {
@@ -881,382 +1282,6 @@ export class TradeService {
         throw error;
       }
       throw new InternalServerErrorException('Failed to get user trades');
-    }
-  }
-
-  private validateTrailingStop(
-    side: OrderSide,
-    currentPrice: string,
-    trailingStopDistance: string,
-  ) {
-    if (this.mathService.compare(trailingStopDistance, '0') <= 0) {
-      throw new Error('Trailing stop distance must be positive');
-    }
-
-    // Additional validation could be added here
-    // For example, minimum distance requirements
-  }
-
-  async editStopLoss(
-    positionId: string,
-    userId: string,
-    stopLossPrice: string | null,
-  ): Promise<Position> {
-    try {
-      const position = await this.getPosition(positionId);
-
-      if (!position) {
-        throw new NotFoundException(`Position ${positionId} not found`);
-      }
-
-      if (position.userId !== userId) {
-        throw new UnauthorizedException(
-          'Not authorized to modify this position',
-        );
-      }
-
-      if (position.status !== PositionStatus.OPEN) {
-        throw new BadRequestException(
-          'Cannot edit stop loss of a closed position',
-        );
-      }
-
-      // If stopLossPrice is null, we're removing the stop loss
-      if (stopLossPrice !== null) {
-        try {
-          this.validateStopLossPrice(
-            position.side,
-            position.entryPrice,
-            stopLossPrice,
-          );
-        } catch (error) {
-          throw new BadRequestException(error.message);
-        }
-      }
-
-      // Update position
-      const updatedPosition = await this.positionRepository.save({
-        ...position,
-        stopLossPrice,
-      });
-
-      await this.invalidatePositionCache(positionId, userId);
-      this.eventsService.emitPositionsUpdate();
-
-      return updatedPosition;
-    } catch (error) {
-      if (
-        error instanceof NotFoundException ||
-        error instanceof UnauthorizedException ||
-        error instanceof BadRequestException
-      ) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to edit stop loss');
-    }
-  }
-
-  async editTakeProfit(
-    positionId: string,
-    userId: string,
-    takeProfitPrice: string | null,
-  ): Promise<Position> {
-    try {
-      const position = await this.getPosition(positionId);
-
-      if (!position) {
-        throw new NotFoundException(`Position ${positionId} not found`);
-      }
-
-      if (position.userId !== userId) {
-        throw new UnauthorizedException(
-          'Not authorized to modify this position',
-        );
-      }
-
-      if (position.status !== PositionStatus.OPEN) {
-        throw new BadRequestException(
-          'Cannot edit take profit of a closed position',
-        );
-      }
-
-      // If takeProfitPrice is null, we're removing the take profit
-      if (takeProfitPrice !== null) {
-        try {
-          this.validateTakeProfitPrice(
-            position.side,
-            position.entryPrice,
-            takeProfitPrice,
-          );
-        } catch (error) {
-          throw new BadRequestException(error.message);
-        }
-      }
-
-      // Update position
-      const updatedPosition = await this.positionRepository.save({
-        ...position,
-        takeProfitPrice,
-      });
-
-      await this.invalidatePositionCache(positionId, userId);
-      this.eventsService.emitPositionsUpdate();
-
-      return updatedPosition;
-    } catch (error) {
-      if (
-        error instanceof NotFoundException ||
-        error instanceof UnauthorizedException ||
-        error instanceof BadRequestException
-      ) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to edit take profit');
-    }
-  }
-
-  async editMargin(
-    positionId: string,
-    userId: string,
-    marginDelta: string,
-  ): Promise<Position> {
-    try {
-      const position = await this.getPosition(positionId);
-
-      if (!position) {
-        throw new NotFoundException(`Position ${positionId} not found`);
-      }
-
-      if (position.userId !== userId) {
-        throw new UnauthorizedException(
-          'Not authorized to modify this position',
-        );
-      }
-
-      if (position.status !== PositionStatus.OPEN) {
-        throw new BadRequestException(
-          'Cannot edit margin of a closed position',
-        );
-      }
-
-      const market = await this.marketRepository.findOne({
-        where: { id: position.marketId },
-      });
-
-      if (!market) {
-        throw new NotFoundException('Market not found');
-      }
-
-      const newMargin = this.mathService.add(position.margin, marginDelta);
-
-      // Check if withdrawal would exceed max leverage
-      if (this.mathService.compare(marginDelta, '0') < 0) {
-        const newLeverage = this.mathService.divide(position.size, newMargin);
-        if (this.mathService.compare(newLeverage, market.maxLeverage) > 0) {
-          throw new BadRequestException(
-            'Withdrawal would exceed maximum leverage',
-          );
-        }
-      } else {
-        // Check if deposit would go below 1x leverage
-        const newLeverage = this.mathService.divide(position.size, newMargin);
-        if (this.mathService.compare(newLeverage, '1') < 0) {
-          throw new BadRequestException(
-            'Deposit would result in leverage below 1x',
-          );
-        }
-
-        // Check if user has sufficient margin for deposit
-        const [solBalance, usdcBalance] = await Promise.all([
-          this.marginService.getBalance(userId, TokenType.SOL),
-          this.marginService.getBalance(userId, TokenType.USDC),
-        ]);
-
-        const solPrice = await this.priceService.getSolPrice();
-        const solBalanceInUSD = this.mathService.multiply(
-          solBalance.availableBalance,
-          solPrice,
-        );
-        const totalAvailableUSD = this.mathService.add(
-          solBalanceInUSD,
-          usdcBalance.availableBalance,
-        );
-
-        if (this.mathService.compare(totalAvailableUSD, marginDelta) < 0) {
-          throw new BadRequestException(
-            'Insufficient margin available for deposit',
-          );
-        }
-      }
-
-      // Calculate proportions for SOL and USDC based on current locked amounts
-      const totalLockedUSD = this.mathService.add(
-        this.mathService.multiply(
-          position.lockedMarginSOL,
-          await this.priceService.getSolPrice(),
-        ),
-        position.lockedMarginUSDC,
-      );
-
-      const solProportion = this.mathService.divide(
-        this.mathService.multiply(
-          position.lockedMarginSOL,
-          await this.priceService.getSolPrice(),
-        ),
-        totalLockedUSD,
-      );
-
-      const solPrice = await this.priceService.getSolPrice();
-      const marginDeltaSOL = this.mathService.divide(
-        this.mathService.multiply(marginDelta, solProportion),
-        solPrice,
-      );
-      const marginDeltaUSDC = this.mathService.multiply(
-        marginDelta,
-        this.mathService.subtract('1', solProportion),
-      );
-
-      // Handle margin adjustments
-      if (this.mathService.compare(marginDelta, '0') > 0) {
-        // Deposit
-        if (this.mathService.compare(marginDeltaSOL, '0') > 0) {
-          await this.marginService.lockMargin(
-            userId,
-            TokenType.SOL,
-            marginDeltaSOL,
-            positionId,
-          );
-        }
-        if (this.mathService.compare(marginDeltaUSDC, '0') > 0) {
-          await this.marginService.lockMargin(
-            userId,
-            TokenType.USDC,
-            marginDeltaUSDC,
-            positionId,
-          );
-        }
-      } else {
-        // Withdrawal
-        if (this.mathService.compare(marginDeltaSOL, '0') < 0) {
-          await this.marginService.releaseMargin(
-            userId,
-            TokenType.SOL,
-            positionId,
-            this.mathService.abs(marginDeltaSOL),
-          );
-        }
-        if (this.mathService.compare(marginDeltaUSDC, '0') < 0) {
-          await this.marginService.releaseMargin(
-            userId,
-            TokenType.USDC,
-            positionId,
-            this.mathService.abs(marginDeltaUSDC),
-          );
-        }
-      }
-
-      // Update position
-      const updatedPosition = await this.positionRepository.save({
-        ...position,
-        margin: newMargin,
-        lockedMarginSOL: this.mathService.add(
-          position.lockedMarginSOL,
-          marginDeltaSOL,
-        ),
-        lockedMarginUSDC: this.mathService.add(
-          position.lockedMarginUSDC,
-          marginDeltaUSDC,
-        ),
-      });
-
-      await this.invalidatePositionCache(positionId, userId);
-      this.eventsService.emitPositionsUpdate();
-
-      return updatedPosition;
-    } catch (error) {
-      if (
-        error instanceof NotFoundException ||
-        error instanceof UnauthorizedException ||
-        error instanceof BadRequestException
-      ) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to edit position margin');
-    }
-  }
-
-  async getBorrowingHistory(
-    positionId: string,
-    startTime?: string,
-    endTime?: string,
-  ): Promise<{
-    totalBorrowingFee: string;
-    history: {
-      timestamp: Date;
-      fee: string;
-      positionValue: string;
-      rate: string;
-    }[];
-  }> {
-    try {
-      if (!positionId) {
-        throw new BadRequestException('Position ID is required');
-      }
-
-      return this.cacheService.wrap(
-        getCacheKey.borrowingHistory(positionId, startTime, endTime),
-        async () => {
-          const position = await this.getPosition(positionId);
-          const start = startTime ? new Date(startTime) : position.createdAt;
-          const end = endTime ? new Date(endTime) : new Date();
-
-          if (start > end) {
-            throw new BadRequestException('Start time must be before end time');
-          }
-
-          const history = [];
-          let currentTime = new Date(start);
-
-          while (currentTime <= end) {
-            try {
-              const hourlyFee = this.mathService.multiply(
-                position.size,
-                '0.0000125',
-              );
-
-              history.push({
-                timestamp: new Date(currentTime),
-                fee: hourlyFee,
-                positionValue: position.size,
-                rate: '0.0000125',
-              });
-
-              currentTime = new Date(currentTime.getTime() + 60 * 60 * 1000);
-            } catch (error) {
-              console.error('Error calculating borrowing fee:', error);
-              // Continue to next iteration even if there's an error
-              currentTime = new Date(currentTime.getTime() + 60 * 60 * 1000);
-            }
-          }
-
-          return {
-            totalBorrowingFee: history.reduce(
-              (sum, entry) => this.mathService.add(sum, entry.fee),
-              '0',
-            ),
-            history,
-          };
-        },
-        CACHE_TTL.TRADE_HISTORY,
-      );
-    } catch (error) {
-      if (
-        error instanceof BadRequestException ||
-        error instanceof NotFoundException
-      ) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to get borrowing history');
     }
   }
 

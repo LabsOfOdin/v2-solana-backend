@@ -6,6 +6,7 @@ import * as WebSocket from 'ws';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Market } from '../entities/market.entity';
+import { TokenType } from '../margin/types/token.types';
 
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use

@@ -5,8 +5,9 @@ import { User } from '../entities/user.entity';
 import { MarginBalance } from '../margin/entities/margin-balance.entity';
 import { MarginLock } from '../entities/margin-lock.entity';
 import { TokenType } from '../margin/types/token.types';
-import { MathService } from '../utils/math.service';
 import { InsufficientMarginError } from '../common/errors';
+import { compare } from 'src/lib/math';
+import { add, subtract } from 'src/lib/math';
 
 @Injectable()
 export class UserService {
@@ -17,7 +18,6 @@ export class UserService {
     private readonly marginBalanceRepository: Repository<MarginBalance>,
     @InjectRepository(MarginLock)
     private readonly marginLockRepository: Repository<MarginLock>,
-    private readonly mathService: MathService,
   ) {}
 
   async createUser(publicKey: string): Promise<User> {
@@ -127,7 +127,7 @@ export class UserService {
   ): Promise<void> {
     const marginBalance = await this.getMarginBalance(publicKey, token);
 
-    if (this.mathService.compare(marginBalance.availableBalance, amount) < 0) {
+    if (compare(marginBalance.availableBalance, amount) < 0) {
       throw new InsufficientMarginError('Insufficient available balance');
     }
 
@@ -138,8 +138,8 @@ export class UserService {
     await this.updateMarginBalance(
       publicKey,
       token,
-      this.mathService.subtract(marginBalance.availableBalance, amount),
-      this.mathService.add(marginBalance.lockedBalance, amount),
+      subtract(marginBalance.availableBalance, amount),
+      add(marginBalance.lockedBalance, amount),
       marginBalance.unrealizedPnl,
     );
   }
@@ -156,14 +156,14 @@ export class UserService {
     ]);
 
     // Calculate final amount to return (original margin + PnL)
-    const returnAmount = this.mathService.add(marginLock.amount, pnl);
+    const returnAmount = add(marginLock.amount, pnl);
 
     // Update balances
     await this.updateMarginBalance(
       userId,
       token,
-      this.mathService.add(marginBalance.availableBalance, returnAmount),
-      this.mathService.subtract(marginBalance.lockedBalance, marginLock.amount),
+      add(marginBalance.availableBalance, returnAmount),
+      subtract(marginBalance.lockedBalance, marginLock.amount),
       marginBalance.unrealizedPnl,
     );
 

@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { OrderRequest } from '../types/trade.types';
-import { MathService } from '../utils/math.service';
 import { PriceService } from '../price/price.service';
+import { divide, multiply } from 'src/lib/math';
+import { compare } from 'src/lib/math';
 
 @Injectable()
 export class LiquidityService {
@@ -13,34 +14,21 @@ export class LiquidityService {
     maxUtilizationRate: '0.8',
   };
 
-  constructor(
-    private readonly mathService: MathService,
-    private readonly priceService: PriceService,
-  ) {}
+  constructor(private readonly priceService: PriceService) {}
 
   async validateLiquidityForTrade(order: OrderRequest): Promise<void> {
     const requiredLiquidity = await this.calculateRequiredLiquidity(order);
 
-    if (
-      this.mathService.compare(
-        this.mockPoolState.availableLiquidity,
-        requiredLiquidity,
-      ) < 0
-    ) {
+    if (compare(this.mockPoolState.availableLiquidity, requiredLiquidity) < 0) {
       throw new Error('Insufficient liquidity in pool');
     }
 
-    const utilizationRate = this.mathService.divide(
+    const utilizationRate = divide(
       requiredLiquidity,
       this.mockPoolState.totalLiquidity,
     );
 
-    if (
-      this.mathService.compare(
-        utilizationRate,
-        this.mockPoolState.maxUtilizationRate,
-      ) > 0
-    ) {
+    if (compare(utilizationRate, this.mockPoolState.maxUtilizationRate) > 0) {
       throw new Error('Trade would exceed maximum utilization rate');
     }
   }
@@ -60,9 +48,6 @@ export class LiquidityService {
     const currentPrice = await this.priceService.getCurrentPrice(
       order.marketId,
     );
-    return this.mathService.divide(
-      this.mathService.multiply(order.size, currentPrice),
-      order.leverage,
-    );
+    return divide(multiply(order.size, currentPrice), order.leverage);
   }
 }

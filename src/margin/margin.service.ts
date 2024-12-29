@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
@@ -9,10 +9,10 @@ import { MarginLock } from '../entities/margin-lock.entity';
 import { User } from '../entities/user.entity';
 import { TokenType } from './types/token.types';
 import { InvalidTokenError, InsufficientMarginError } from '../common/errors';
-import { MathService } from '../utils/math.service';
 import { UserService } from '../user/user.service';
 import { MarginBalance } from './entities/margin-balance.entity';
 import { SolanaService } from '../solana/solana.service';
+import { add, compare, subtract } from 'src/lib/math';
 
 /**
  * @security checks:
@@ -33,7 +33,6 @@ export class MarginService {
     @InjectRepository(MarginLock)
     private readonly marginLockRepository: Repository<MarginLock>,
     private readonly userService: UserService,
-    private readonly mathService: MathService,
     private readonly solanaService: SolanaService,
   ) {}
 
@@ -64,10 +63,7 @@ export class MarginService {
     );
 
     // Update available balance
-    const newAvailableBalance = this.mathService.add(
-      marginBalance.availableBalance,
-      amount,
-    );
+    const newAvailableBalance = add(marginBalance.availableBalance, amount);
 
     // Save updated balance
     await this.userService.updateMarginBalance(
@@ -98,12 +94,12 @@ export class MarginService {
       token,
     );
 
-    if (this.mathService.compare(marginBalance.availableBalance, amount) < 0) {
+    if (compare(marginBalance.availableBalance, amount) < 0) {
       throw new InsufficientMarginError('Insufficient balance for withdrawal');
     }
 
     // Reduce available balance
-    const newAvailableBalance = this.mathService.subtract(
+    const newAvailableBalance = subtract(
       marginBalance.availableBalance,
       amount,
     );
@@ -140,7 +136,7 @@ export class MarginService {
       token,
     );
 
-    if (this.mathService.compare(marginBalance.availableBalance, amount) < 0) {
+    if (compare(marginBalance.availableBalance, amount) < 0) {
       throw new InsufficientMarginError('Insufficient available margin');
     }
 
@@ -154,14 +150,11 @@ export class MarginService {
     await this.marginLockRepository.save(marginLock);
 
     // Update balances
-    const newAvailableBalance = this.mathService.subtract(
+    const newAvailableBalance = subtract(
       marginBalance.availableBalance,
       amount,
     );
-    const newLockedBalance = this.mathService.add(
-      marginBalance.lockedBalance,
-      amount,
-    );
+    const newLockedBalance = add(marginBalance.lockedBalance, amount);
 
     await this.userService.updateMarginBalance(
       userId,
@@ -190,14 +183,14 @@ export class MarginService {
     }
 
     // Calculate final amount to return (original margin + PnL)
-    const returnAmount = this.mathService.add(marginLock.amount, pnl);
+    const returnAmount = add(marginLock.amount, pnl);
 
     // Update balances
-    const newLockedBalance = this.mathService.subtract(
+    const newLockedBalance = subtract(
       marginBalance.lockedBalance,
       marginLock.amount,
     );
-    const newAvailableBalance = this.mathService.add(
+    const newAvailableBalance = add(
       marginBalance.availableBalance,
       returnAmount,
     );
@@ -255,7 +248,7 @@ export class MarginService {
       withdrawal.token,
     );
 
-    const newAvailableBalance = this.mathService.add(
+    const newAvailableBalance = add(
       marginBalance.availableBalance,
       withdrawal.amount,
     );
@@ -272,5 +265,21 @@ export class MarginService {
     withdrawal.status = WithdrawalStatus.REJECTED;
     withdrawal.processingNotes = reason;
     return this.withdrawalRequestRepository.save(withdrawal);
+  }
+
+  /**
+   * @audit Implement
+   */
+  async deductMargin(
+    userId: string,
+    token: TokenType,
+    amount: string,
+  ): Promise<void> {
+    // In production, this would:
+    // 1. Check if user has enough margin
+    // 2. Update user's margin balance
+    // 3. Record the deduction in history
+    // For now, just mock the implementation
+    console.log(`Deducting ${amount} ${token} from user ${userId}`);
   }
 }

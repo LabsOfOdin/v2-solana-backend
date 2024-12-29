@@ -5,7 +5,6 @@ import { LimitOrder } from '../entities/limit-order.entity';
 import { PriceService } from '../price/price.service';
 import { TradeService } from '../trade/trade.service';
 import { MarginService } from '../margin/margin.service';
-import { MathService } from '../utils/math.service';
 import { EventsService } from '../events/events.service';
 import {
   OrderRequest,
@@ -14,6 +13,7 @@ import {
   OrderSide,
 } from '../types/trade.types';
 import { Market } from '../entities/market.entity';
+import { compare, divide, multiply } from 'src/lib/math';
 
 @Injectable()
 export class LimitOrderService {
@@ -26,7 +26,6 @@ export class LimitOrderService {
     private readonly priceService: PriceService,
     private readonly tradeService: TradeService,
     private readonly marginService: MarginService,
-    private readonly mathService: MathService,
     private readonly eventsService: EventsService,
     @InjectRepository(Market)
     private readonly marketRepository: Repository<Market>,
@@ -46,11 +45,16 @@ export class LimitOrderService {
   }
 
   async createLimitOrder(orderRequest: LimitOrderRequest): Promise<LimitOrder> {
+    if (
+      orderRequest.leverage === '0' ||
+      orderRequest.size === '0' ||
+      orderRequest.price === '0'
+    ) {
+      throw new Error('Invalid Parameters');
+    }
+
     // Calculate required margin in usd (size / leverage)
-    const requiredMargin = this.mathService.divide(
-      orderRequest.size,
-      orderRequest.leverage,
-    );
+    const requiredMargin = divide(orderRequest.size, orderRequest.leverage);
 
     // Validate user has enough balance
     const marginBalance = await this.marginService.getBalance(
@@ -63,12 +67,12 @@ export class LimitOrderService {
         ? '1'
         : await this.priceService.getSolPrice();
 
-    const availableBalanceUsd = this.mathService.multiply(
+    const availableBalanceUsd = multiply(
       marginBalance.availableBalance,
       marginPrice,
     );
 
-    if (this.mathService.compare(availableBalanceUsd, requiredMargin) < 0) {
+    if (compare(availableBalanceUsd, requiredMargin) < 0) {
       throw new Error('Insufficient balance for limit order');
     }
 
@@ -91,7 +95,7 @@ export class LimitOrderService {
       leverage: orderRequest.leverage,
       token: orderRequest.token,
       symbol: market.symbol,
-      requiredMargin: this.mathService.divide(requiredMargin, marginPrice),
+      requiredMargin: divide(requiredMargin, marginPrice),
       status: OrderStatus.OPEN,
     });
 
@@ -156,7 +160,7 @@ export class LimitOrderService {
     limitPrice: string,
     currentPrice: string,
   ): boolean {
-    const comparison = this.mathService.compare(currentPrice, limitPrice);
+    const comparison = compare(currentPrice, limitPrice);
     return (
       (side === OrderSide.LONG && comparison <= 0) || // Buy when price falls to or below limit
       (side === OrderSide.SHORT && comparison >= 0) // Sell when price rises to or above limit
@@ -174,19 +178,14 @@ export class LimitOrderService {
       const marginPrice =
         order.token === 'USDC' ? '1' : await this.priceService.getSolPrice();
 
-      const availableBalanceUsd = this.mathService.multiply(
+      const availableBalanceUsd = multiply(
         marginBalance.availableBalance,
         marginPrice,
       );
 
-      const requiredMarginUsd = this.mathService.multiply(
-        order.requiredMargin,
-        marginPrice,
-      );
+      const requiredMarginUsd = multiply(order.requiredMargin, marginPrice);
 
-      if (
-        this.mathService.compare(availableBalanceUsd, requiredMarginUsd) < 0
-      ) {
+      if (compare(availableBalanceUsd, requiredMarginUsd) < 0) {
         // Cancel the order if insufficient margin
         await this.limitOrderRepository.update(order.id, {
           status: OrderStatus.CANCELLED,

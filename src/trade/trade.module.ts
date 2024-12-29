@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TradeService } from './trade.service';
 import { Position } from '../entities/position.entity';
@@ -11,6 +11,7 @@ import { UtilsModule } from '../utils/utils.module';
 import { MarginModule } from 'src/margin/margin.module';
 import { TradeController } from './trade.controller';
 import { EventsModule } from 'src/events/events.module';
+import { MarketModule } from 'src/market/market.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { EventsModule } from 'src/events/events.module';
     UtilsModule,
     MarginModule,
     EventsModule,
+    forwardRef(() => MarketModule),
   ],
   providers: [TradeService],
   controllers: [TradeController],

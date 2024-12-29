@@ -10,18 +10,24 @@ export interface CreateMarketDto {
   poolAddress: string;
   maxLeverage: string;
   maintainanceMargin: string;
-  takerFee: string;
-  makerFee: string;
+  borrowingRate?: string;
+  longOpenInterest?: string;
+  shortOpenInterest?: string;
+  maxFundingRate?: string;
+  maxFundingVelocity?: string;
 }
 
 export interface UpdateMarketDto {
   maxLeverage?: string;
   maintainanceMargin?: string;
-  takerFee?: string;
-  makerFee?: string;
   status?: MarketStatus;
   fundingRate?: string;
+  borrowingRate?: string;
+  longOpenInterest?: string;
+  shortOpenInterest?: string;
   poolAddress?: string;
+  maxFundingRate?: string;
+  maxFundingVelocity?: string;
 }
 
 export interface MarketInfo {
@@ -31,26 +37,25 @@ export interface MarketInfo {
   poolAddress: string;
   maxLeverage: string;
   maintainanceMargin: string;
-  takerFee: string;
-  makerFee: string;
   status: MarketStatus;
   fundingRate: string;
   lastPrice?: string;
   volume24h?: string;
   openInterest?: string;
+  borrowingRate?: string;
+  longOpenInterest?: string;
+  shortOpenInterest?: string;
 }
 
 export interface MarketStats {
-  price: string;
+  markPrice: string;
   priceChange24h: string;
   volume24h: string;
   openInterest: string;
   fundingRate: string;
-  nextFundingTime: Date;
-  markPrice: string;
-  indexPrice: string;
   maxLeverage: string;
   liquidationFee: string;
-  tradingFee: string;
   borrowingRate: string;
+  longOpenInterest: string;
+  shortOpenInterest: string;
 }
