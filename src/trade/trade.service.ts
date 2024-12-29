@@ -5,8 +5,6 @@ import {
   BadRequestException,
   InternalServerErrorException,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Not, Repository } from 'typeorm';
 import { Position, PositionStatus } from '../entities/position.entity';
 import { Market } from '../entities/market.entity';
 import { PriceService } from '../price/price.service';
@@ -16,11 +14,11 @@ import { CACHE_TTL, getCacheKey } from '../constants/cache.constants';
 import { OrderRequest, OrderSide, Trade } from '../types/trade.types';
 import { Trade as TradeEntity } from '../entities/trade.entity';
 import { MarginService } from '../margin/margin.service';
-import { TokenType } from '../margin/types/token.types';
+import { TokenType } from 'src/types/token.types';
 import { EventsService } from '../events/events.service';
 import { LIQUIDITY_SCALAR, TRADING_FEE } from '../common/config';
 import { MarketService } from '../market/market.service';
-import { MarginBalance } from 'src/margin/entities/margin-balance.entity';
+import { MarginBalance } from 'src/entities/margin-balance.entity';
 import {
   abs,
   add,
@@ -34,21 +32,16 @@ import {
   multiply,
   subtract,
 } from 'src/lib/math';
+import { DatabaseService } from 'src/database/database.service';
 
 @Injectable()
 export class TradeService {
   private readonly checkInterval = 10000; // 10 seconds
 
   constructor(
-    @InjectRepository(Position)
-    private readonly positionRepository: Repository<Position>,
-    @InjectRepository(TradeEntity)
-    private readonly tradeRepository: Repository<TradeEntity>,
-    @InjectRepository(Market)
-    private readonly marketRepository: Repository<Market>,
+    private readonly databaseService: DatabaseService,
     private readonly priceService: PriceService,
     private readonly liquidityService: LiquidityService,
-
     private readonly cacheService: CacheService,
     private readonly marginService: MarginService,
     private readonly eventsService: EventsService,
@@ -73,18 +66,25 @@ export class TradeService {
   }
 
   private async checkPositionsForStopLossAndTakeProfit(): Promise<void> {
-    const positions = await this.positionRepository.find({
-      where: [
-        {
-          stopLossPrice: Not(IsNull()),
-          status: PositionStatus.OPEN,
-        },
-        {
-          takeProfitPrice: Not(IsNull()),
-          status: PositionStatus.OPEN,
-        },
-      ],
-    });
+    const positions: Position[] = await this.databaseService.select(
+      'positions',
+      {
+        or: [
+          {
+            eq: {
+              status: 'OPEN',
+            },
+            notNull: ['stopLossPrice'],
+          },
+          {
+            eq: {
+              status: 'OPEN',
+            },
+            notNull: ['takeProfitPrice'],
+          },
+        ],
+      },
+    );
 
     for (const position of positions) {
       try {
@@ -181,9 +181,7 @@ export class TradeService {
       // 2. Fetch market
       let market: Market;
       try {
-        market = await this.marketRepository.findOne({
-          where: { id: orderRequest.marketId },
-        });
+        market = await this.marketService.getMarketById(orderRequest.marketId);
       } catch (error) {
         throw new InternalServerErrorException(
           `Failed to fetch market: ${error.message}`,
@@ -273,25 +271,23 @@ export class TradeService {
       }
 
       // 13. Create position
-      const position = await this.positionRepository.save(
-        this.positionRepository.create({
-          id: positionId,
-          userId: orderRequest.userId,
-          marketId: orderRequest.marketId,
-          symbol: market.symbol,
-          side: orderRequest.side,
-          size: orderRequest.size,
-          entryPrice,
-          leverage: orderRequest.leverage,
-          stopLossPrice: orderRequest.stopLossPrice,
-          takeProfitPrice: orderRequest.takeProfitPrice,
-          margin: requiredMarginUSD,
-          token: orderRequest.token,
-          lockedMarginSOL: isSol ? amountToLock : '0',
-          lockedMarginUSDC: !isSol ? amountToLock : '0',
-          status: PositionStatus.OPEN,
-        }),
-      );
+      const [position] = await this.databaseService.insert('positions', {
+        id: positionId,
+        userId: orderRequest.userId,
+        marketId: orderRequest.marketId,
+        symbol: market.symbol,
+        side: orderRequest.side,
+        size: orderRequest.size,
+        entryPrice,
+        leverage: orderRequest.leverage,
+        stopLossPrice: orderRequest.stopLossPrice,
+        takeProfitPrice: orderRequest.takeProfitPrice,
+        margin: requiredMarginUSD,
+        token: orderRequest.token,
+        lockedMarginSOL: isSol ? amountToLock : '0',
+        lockedMarginUSDC: !isSol ? amountToLock : '0',
+        status: PositionStatus.OPEN,
+      });
 
       // 14. Emit position update event
       this.eventsService.emitPositionsUpdate();
@@ -476,30 +472,38 @@ export class TradeService {
       let updatedPosition: Position;
       try {
         if (isFullClose) {
-          updatedPosition = await this.positionRepository.save({
-            ...position,
-            status: PositionStatus.CLOSED,
-            closedAt: new Date(),
-            closingPrice: currentPrice,
-            realizedPnl: realizedPnlUSD,
-          });
+          [updatedPosition] = await this.databaseService.update(
+            'positions',
+            {
+              ...position,
+              status: PositionStatus.CLOSED,
+              closedAt: new Date(),
+              closingPrice: currentPrice,
+              realizedPnl: realizedPnlUSD,
+            },
+            { id: position.id },
+          );
         } else {
-          updatedPosition = await this.positionRepository.save({
-            ...position,
-            size: remainingSize,
-            lockedMarginSOL: subtract(
-              position.lockedMarginSOL,
-              solMarginToRelease,
-            ),
-            lockedMarginUSDC: subtract(
-              position.lockedMarginUSDC,
-              usdcMarginToRelease,
-            ),
-            margin: subtract(
-              position.margin,
-              multiply(position.margin, closeProportion),
-            ),
-          });
+          [updatedPosition] = await this.databaseService.update(
+            'positions',
+            {
+              ...position,
+              size: remainingSize,
+              lockedMarginSOL: subtract(
+                position.lockedMarginSOL,
+                solMarginToRelease,
+              ),
+              lockedMarginUSDC: subtract(
+                position.lockedMarginUSDC,
+                usdcMarginToRelease,
+              ),
+              margin: subtract(
+                position.margin,
+                multiply(position.margin, closeProportion),
+              ),
+            },
+            { id: position.id },
+          );
         }
       } catch (error) {
         throw new InternalServerErrorException(
@@ -595,10 +599,14 @@ export class TradeService {
       }
 
       // Update position
-      const updatedPosition = await this.positionRepository.save({
-        ...position,
-        stopLossPrice,
-      });
+      const [updatedPosition] = await this.databaseService.update(
+        'positions',
+        {
+          ...position,
+          stopLossPrice,
+        },
+        { id: position.id },
+      );
 
       await this.invalidatePositionCache(positionId, userId);
       this.eventsService.emitPositionsUpdate();
@@ -655,10 +663,14 @@ export class TradeService {
       }
 
       // Update position
-      const updatedPosition = await this.positionRepository.save({
-        ...position,
-        takeProfitPrice,
-      });
+      const [updatedPosition] = await this.databaseService.update(
+        'positions',
+        {
+          ...position,
+          takeProfitPrice,
+        },
+        { id: position.id },
+      );
 
       await this.invalidatePositionCache(positionId, userId);
       this.eventsService.emitPositionsUpdate();
@@ -700,9 +712,7 @@ export class TradeService {
         );
       }
 
-      const market = await this.marketRepository.findOne({
-        where: { id: position.marketId },
-      });
+      const market = await this.marketService.getMarketById(position.marketId);
 
       if (!market) {
         throw new NotFoundException('Market not found');
@@ -814,12 +824,16 @@ export class TradeService {
       }
 
       // Update position
-      const updatedPosition = await this.positionRepository.save({
-        ...position,
-        margin: newMargin,
-        lockedMarginSOL: add(position.lockedMarginSOL, marginDeltaSOL),
-        lockedMarginUSDC: add(position.lockedMarginUSDC, marginDeltaUSDC),
-      });
+      const [updatedPosition] = await this.databaseService.update(
+        'positions',
+        {
+          ...position,
+          margin: newMargin,
+          lockedMarginSOL: add(position.lockedMarginSOL, marginDeltaSOL),
+          lockedMarginUSDC: add(position.lockedMarginUSDC, marginDeltaUSDC),
+        },
+        { id: position.id },
+      );
 
       await this.invalidatePositionCache(positionId, userId);
       this.eventsService.emitPositionsUpdate();
@@ -853,9 +867,7 @@ export class TradeService {
       }
 
       // Get market details
-      const market = await this.marketRepository.findOne({
-        where: { id: order.marketId },
-      });
+      const market = await this.marketService.getMarketById(order.marketId);
 
       if (!market) {
         throw new NotFoundException('Market not found');
@@ -971,13 +983,13 @@ export class TradeService {
       // Update impact pool and return capped impact
       if (isPositive(finalImpactUsd)) {
         const cappedImpact = min(finalImpactUsd, market.impactPool);
-        await this.marketRepository.update(market.id, {
+        await this.marketService.updateMarket(market.id, {
           impactPool: subtract(market.impactPool, cappedImpact),
         });
         return cappedImpact;
       }
 
-      await this.marketRepository.update(market.id, {
+      await this.marketService.updateMarket(market.id, {
         impactPool: add(market.impactPool, abs(finalImpactUsd)),
       });
       return finalImpactUsd;
@@ -1116,11 +1128,7 @@ export class TradeService {
         throw new BadRequestException('Invalid trade data');
       }
 
-      await this.tradeRepository
-        .save(this.tradeRepository.create(trade))
-        .catch(() => {
-          throw new InternalServerErrorException('Failed to save trade');
-        });
+      await this.databaseService.insert('trades', trade);
 
       await this.invalidatePositionCache(trade.positionId, trade.userId);
     } catch (error) {
@@ -1147,15 +1155,12 @@ export class TradeService {
       return this.cacheService.wrap(
         getCacheKey.position(positionId),
         async () => {
-          const position = await this.positionRepository
-            .findOne({
-              where: { id: positionId },
-            })
-            .catch(() => {
-              throw new InternalServerErrorException(
-                'Failed to fetch position',
-              );
-            });
+          const [position] = await this.databaseService.select<Position>(
+            'positions',
+            {
+              eq: { id: positionId },
+            },
+          );
 
           if (!position) {
             throw new NotFoundException(`Position ${positionId} not found`);
@@ -1186,16 +1191,13 @@ export class TradeService {
       return this.cacheService.wrap(
         getCacheKey.userPositions(userId),
         async () => {
-          const positions = await this.positionRepository
-            .find({
-              where: { userId },
-              order: { createdAt: 'DESC' },
-            })
-            .catch(() => {
-              throw new InternalServerErrorException(
-                'Failed to fetch user positions',
-              );
-            });
+          const positions = await this.databaseService.select<Position>(
+            'positions',
+            {
+              eq: { userId },
+              order: { column: 'createdAt', ascending: false },
+            },
+          );
 
           return positions;
         },
@@ -1230,16 +1232,13 @@ export class TradeService {
       return this.cacheService.wrap(
         getCacheKey.positionTrades(positionId),
         async () => {
-          const trades = await this.tradeRepository
-            .find({
-              where: { positionId },
-              order: { createdAt: 'DESC' },
-            })
-            .catch(() => {
-              throw new InternalServerErrorException(
-                'Failed to fetch position trades',
-              );
-            });
+          const trades = await this.databaseService.select<TradeEntity>(
+            'trades',
+            {
+              eq: { positionId },
+              order: { column: 'createdAt', ascending: false },
+            },
+          );
 
           return trades;
         },
@@ -1265,16 +1264,13 @@ export class TradeService {
       return this.cacheService.wrap(
         getCacheKey.userTrades(userId),
         async () => {
-          const trades = await this.tradeRepository
-            .find({
-              where: { userId },
-              order: { createdAt: 'DESC' },
-            })
-            .catch(() => {
-              throw new InternalServerErrorException(
-                'Failed to fetch user trades',
-              );
-            });
+          const trades = await this.databaseService.select<TradeEntity>(
+            'trades',
+            {
+              eq: { userId },
+              order: { column: 'createdAt', ascending: false },
+            },
+          );
 
           return trades;
         },

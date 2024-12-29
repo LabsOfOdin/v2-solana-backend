@@ -4,8 +4,7 @@ import {
   ConflictException,
   Inject,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DatabaseService } from '../database/database.service';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
 import { Market } from '../entities/market.entity';
@@ -22,15 +21,14 @@ import { add } from 'src/lib/math';
 @Injectable()
 export class MarketService {
   constructor(
-    @InjectRepository(Market)
-    private readonly marketRepository: Repository<Market>,
+    private readonly databaseService: DatabaseService,
     private readonly priceService: PriceService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}
 
-  @Cron(CronExpression.EVERY_MINUTE) // Runs every minute
+  @Cron(CronExpression.EVERY_MINUTE)
   async updateFundingRates(): Promise<void> {
-    const markets = await this.marketRepository.find();
+    const markets = await this.databaseService.select<Market>('markets', {});
 
     await Promise.all(
       markets.map((market) => this.calculateFundingRate(market)),
@@ -40,15 +38,19 @@ export class MarketService {
   }
 
   async createMarket(dto: CreateMarketDto): Promise<Market> {
-    const existingMarket = await this.marketRepository.findOne({
-      where: { symbol: dto.symbol },
-    });
+    const [existingMarket] = await this.databaseService.select<Market>(
+      'markets',
+      {
+        eq: { symbol: dto.symbol },
+        limit: 1,
+      },
+    );
 
     if (existingMarket) {
       throw new ConflictException(`Market ${dto.symbol} already exists`);
     }
 
-    const market = this.marketRepository.create({
+    const [market] = await this.databaseService.insert<Market>('markets', {
       ...dto,
       longOpenInterest: '0',
       shortOpenInterest: '0',
@@ -60,37 +62,40 @@ export class MarketService {
       lastUpdatedTimestamp: Date.now(),
     });
 
-    const savedMarket = await this.marketRepository.save(market);
     await this.invalidateMarketCache();
-    return savedMarket;
+    return market;
   }
 
   async updateMarket(marketId: string, dto: UpdateMarketDto): Promise<Market> {
     const market = await this.getMarketById(marketId);
+    const updateData: Partial<Market> = { ...dto };
 
     if (dto.longOpenInterest) {
-      market.longOpenInterest = dto.longOpenInterest;
+      updateData.longOpenInterest = dto.longOpenInterest;
     }
 
     if (dto.shortOpenInterest) {
-      market.shortOpenInterest = dto.shortOpenInterest;
+      updateData.shortOpenInterest = dto.shortOpenInterest;
     }
 
     if (dto.borrowingRate) {
-      market.borrowingRate = dto.borrowingRate;
+      updateData.borrowingRate = dto.borrowingRate;
     }
 
     if (dto.maxFundingRate) {
-      market.maxFundingRate = dto.maxFundingRate;
+      updateData.maxFundingRate = dto.maxFundingRate;
     }
 
     if (dto.maxFundingVelocity) {
-      market.maxFundingVelocity = dto.maxFundingVelocity;
+      updateData.maxFundingVelocity = dto.maxFundingVelocity;
     }
 
-    Object.assign(market, dto);
+    const [updatedMarket] = await this.databaseService.update<Market>(
+      'markets',
+      updateData,
+      { id: marketId },
+    );
 
-    const updatedMarket = await this.marketRepository.save(market);
     await this.invalidateMarketCache();
     return updatedMarket;
   }
@@ -103,8 +108,9 @@ export class MarketService {
       return cachedMarket;
     }
 
-    const market = await this.marketRepository.findOne({
-      where: { id: marketId },
+    const [market] = await this.databaseService.select<Market>('markets', {
+      eq: { id: marketId },
+      limit: 1,
     });
 
     if (!market) {
@@ -123,8 +129,9 @@ export class MarketService {
       return cachedMarket;
     }
 
-    const market = await this.marketRepository.findOne({
-      where: { symbol },
+    const [market] = await this.databaseService.select<Market>('markets', {
+      eq: { symbol },
+      limit: 1,
     });
 
     if (!market) {
@@ -143,23 +150,19 @@ export class MarketService {
       return cachedMarkets;
     }
 
-    const markets = await this.marketRepository.find({
-      order: { symbol: 'ASC' },
+    const markets = await this.databaseService.select<Market>('markets', {
+      order: { column: 'symbol', ascending: true },
     });
 
     // Transform markets into MarketInfo array
     const marketsInfo = await Promise.all(
       markets.map(async (market) => {
         const lastPrice = await this.priceService.getCurrentPrice(market.id);
-        // Don't cache these as they are real-time values
-        const volume24h = '0';
-        const openInterest = '0';
-
         return {
           ...market,
           lastPrice,
-          volume24h,
-          openInterest,
+          volume24h: '0',
+          openInterest: '0',
         };
       }),
     );
@@ -168,10 +171,6 @@ export class MarketService {
     return marketsInfo;
   }
 
-  /**
-   * @audit Need to implement 24h volume and open interest.
-   * Also add 24hr high and low.
-   */
   async getMarketInfo(marketId: string): Promise<MarketInfo> {
     const market = await this.getMarketById(marketId);
     const lastPrice = await this.priceService.getCurrentPrice(marketId);
@@ -181,7 +180,7 @@ export class MarketService {
       lastPrice,
       volume24h: '0',
       openInterest: '0',
-      borrowingRate: market.borrowingRate, // Include the borrowing rate
+      borrowingRate: market.borrowingRate,
       longOpenInterest: market.longOpenInterest,
       shortOpenInterest: market.shortOpenInterest,
     };
@@ -191,9 +190,11 @@ export class MarketService {
     const market = await this.getMarketById(marketId);
     const newFundingRate = await this.calculateFundingRate(market);
 
-    await this.marketRepository.update(marketId, {
-      fundingRate: newFundingRate,
-    });
+    await this.databaseService.update<Market>(
+      'markets',
+      { fundingRate: newFundingRate },
+      { id: marketId },
+    );
 
     await this.invalidateMarketCache();
   }
@@ -293,7 +294,7 @@ export class MarketService {
 
   private async calculateFundingRate(market: Market): Promise<string> {
     const now = Date.now();
-    const timeElapsed = (now - market.lastUpdatedTimestamp) / 1000; // in seconds
+    const timeElapsed = (now - market.lastUpdatedTimestamp) / 1000;
 
     // Calculate skew and skewScale dynamically
     const longOI = Number(market.longOpenInterest);
@@ -326,12 +327,16 @@ export class MarketService {
     );
 
     // Update market properties
-    market.fundingRateVelocity = newFundingRateVelocity.toString();
-    market.lastUpdatedTimestamp = now;
+    await this.databaseService.update<Market>(
+      'markets',
+      {
+        fundingRateVelocity: newFundingRateVelocity.toString(),
+        lastUpdatedTimestamp: now,
+      },
+      { id: market.id },
+    );
 
-    await this.marketRepository.save(market);
-
-    return currentFundingRate.toFixed(8); // Return a string with 8 decimal places
+    return currentFundingRate.toFixed(8);
   }
 
   private async calculateUnrecordedFunding(market: Market): Promise<string> {
@@ -368,10 +373,11 @@ export class MarketService {
     const market = await this.getMarketById(marketId);
     const claimedAmount = market.unclaimedFees;
 
-    // Reset unclaimed fees to 0
-    await this.marketRepository.update(marketId, {
-      unclaimedFees: '0',
-    });
+    await this.databaseService.update<Market>(
+      'markets',
+      { unclaimedFees: '0' },
+      { id: marketId },
+    );
 
     await this.invalidateMarketCache();
     return { claimedAmount };
@@ -380,10 +386,14 @@ export class MarketService {
   async addTradingFees(marketId: string, fees: string): Promise<void> {
     const market = await this.getMarketById(marketId);
 
-    await this.marketRepository.update(marketId, {
-      cumulativeFees: add(market.cumulativeFees, fees),
-      unclaimedFees: add(market.unclaimedFees, fees),
-    });
+    await this.databaseService.update<Market>(
+      'markets',
+      {
+        cumulativeFees: add(market.cumulativeFees, fees),
+        unclaimedFees: add(market.unclaimedFees, fees),
+      },
+      { id: marketId },
+    );
 
     await this.invalidateMarketCache();
   }

@@ -1,36 +1,43 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { User } from '../entities/user.entity';
-import { MarginBalance } from '../margin/entities/margin-balance.entity';
+import { MarginBalance } from 'src/entities/margin-balance.entity';
 import { MarginLock } from '../entities/margin-lock.entity';
-import { TokenType } from '../margin/types/token.types';
+import { TokenType } from 'src/types/token.types';
 import { InsufficientMarginError } from '../common/errors';
 import { compare } from 'src/lib/math';
 import { add, subtract } from 'src/lib/math';
+import { DatabaseService } from 'src/database/database.service';
+import { Position } from 'src/entities/position.entity';
+import { LPPosition } from 'src/entities/lp-position.entity';
+import { LimitOrder } from 'src/entities/limit-order.entity';
 
 @Injectable()
 export class UserService {
-  constructor(
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
-    @InjectRepository(MarginBalance)
-    private readonly marginBalanceRepository: Repository<MarginBalance>,
-    @InjectRepository(MarginLock)
-    private readonly marginLockRepository: Repository<MarginLock>,
-  ) {}
+  constructor(private readonly databaseService: DatabaseService) {}
 
   async createUser(publicKey: string): Promise<User> {
-    const user = this.userRepository.create({
-      publicKey,
-    });
+    const date: Date = new Date();
 
-    return this.userRepository.save(user);
+    const defaultUser = {
+      publicKey,
+      positions: [] as Position[],
+      marginLocks: [] as MarginLock[],
+      lpPositions: [] as LPPosition[],
+      marginBalances: [] as MarginBalance[],
+      limitOrders: [] as LimitOrder[],
+      createdAt: date,
+      updatedAt: date,
+    };
+
+    const [user] = await this.databaseService.insert('users', defaultUser);
+
+    return user;
   }
 
   async getUserByPublicKey(publicKey: string): Promise<User> {
-    const user = await this.userRepository.findOne({
-      where: { publicKey },
+    const [user] = await this.databaseService.select<User>('users', {
+      eq: { publicKey },
+      limit: 1,
     });
 
     if (!user) {
@@ -46,18 +53,25 @@ export class UserService {
     publicKey: string,
     token: TokenType,
   ): Promise<MarginBalance> {
-    const marginBalance = await this.marginBalanceRepository.findOne({
-      where: { userId: publicKey, token },
-    });
+    const [marginBalance] = await this.databaseService.select<MarginBalance>(
+      'margin_balances',
+      {
+        eq: { userId: publicKey, token },
+        limit: 1,
+      },
+    );
 
     if (!marginBalance) {
-      return this.marginBalanceRepository.create({
+      /**
+       * @dev Returned as any to ignore warning about return type.
+       */
+      return (await this.databaseService.insert('margin_balances', {
         userId: publicKey,
         token,
         availableBalance: '0',
         lockedBalance: '0',
         unrealizedPnl: '0',
-      });
+      })) as any;
     }
 
     return marginBalance;
@@ -70,25 +84,31 @@ export class UserService {
     lockedBalance: string,
     unrealizedPnl: string,
   ): Promise<void> {
-    let marginBalance = await this.marginBalanceRepository.findOne({
-      where: { userId: publicKey, token },
-    });
+    let [marginBalance] = await this.databaseService.select<MarginBalance>(
+      'margin_balances',
+      {
+        eq: { userId: publicKey, token },
+        limit: 1,
+      },
+    );
 
     if (!marginBalance) {
-      marginBalance = this.marginBalanceRepository.create({
+      [marginBalance] = (await this.databaseService.insert('margin_balances', {
         userId: publicKey,
         token,
         availableBalance: '0',
         lockedBalance: '0',
         unrealizedPnl: '0',
-      });
+      })) as any;
     }
 
     marginBalance.availableBalance = availableBalance;
     marginBalance.lockedBalance = lockedBalance;
     marginBalance.unrealizedPnl = unrealizedPnl;
 
-    await this.marginBalanceRepository.save(marginBalance);
+    await this.databaseService.update('margin_balances', marginBalance, {
+      id: marginBalance.id,
+    });
   }
 
   async createMarginLock(
@@ -97,20 +117,24 @@ export class UserService {
     token: TokenType,
     amount: string,
   ): Promise<MarginLock> {
-    const marginLock = this.marginLockRepository.create({
+    const [marginLock] = (await this.databaseService.insert('margin_locks', {
       userId: publicKey,
       tradeId,
       token,
       amount,
-    });
+    })) as any;
 
-    return this.marginLockRepository.save(marginLock);
+    return marginLock;
   }
 
   async getMarginLock(tradeId: string): Promise<MarginLock> {
-    const marginLock = await this.marginLockRepository.findOne({
-      where: { tradeId },
-    });
+    const [marginLock] = await this.databaseService.select<MarginLock>(
+      'margin_locks',
+      {
+        eq: { tradeId },
+        limit: 1,
+      },
+    );
 
     if (!marginLock) {
       throw new NotFoundException(`Margin lock for trade ${tradeId} not found`);
@@ -168,6 +192,6 @@ export class UserService {
     );
 
     // Remove margin lock
-    await this.marginLockRepository.delete({ tradeId });
+    await this.databaseService.delete('margin_locks', { tradeId });
   }
 }

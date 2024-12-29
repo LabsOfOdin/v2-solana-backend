@@ -1,11 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DatabaseService } from '../database/database.service';
 import { Position, PositionStatus } from '../entities/position.entity';
 import { Market } from '../entities/market.entity';
 import { PriceService } from '../price/price.service';
 import { OrderSide } from '../types/trade.types';
-import { TokenType } from '../margin/types/token.types';
+import { TokenType } from 'src/types/token.types';
 import { MarginService } from '../margin/margin.service';
 import { MarketService } from '../market/market.service';
 import { EventsService } from '../events/events.service';
@@ -14,14 +13,11 @@ import { add, compare, divide, multiply, subtract } from 'src/lib/math';
 @Injectable()
 export class LiquidationService {
   private readonly logger = new Logger(LiquidationService.name);
-  private readonly checkInterval = 5000; // 5 seconds - more frequent than limit orders
-  private readonly maintenanceMarginRate = '0.05'; // 5% maintenance margin rate
+  private readonly checkInterval = 5000;
+  private readonly maintenanceMarginRate = '0.05';
 
   constructor(
-    @InjectRepository(Position)
-    private readonly positionRepository: Repository<Position>,
-    @InjectRepository(Market)
-    private readonly marketRepository: Repository<Market>,
+    private readonly databaseService: DatabaseService,
     private readonly priceService: PriceService,
     private readonly eventsService: EventsService,
     private readonly marginService: MarginService,
@@ -44,9 +40,14 @@ export class LiquidationService {
   }
 
   async getLiquidationPrice(positionId: string): Promise<string> {
-    const position = await this.positionRepository.findOne({
-      where: { id: positionId },
-    });
+    const [position] = await this.databaseService.select<Position>(
+      'positions',
+      {
+        eq: { id: positionId },
+        limit: 1,
+      },
+    );
+
     if (!position) {
       throw new Error('Position not found');
     }
@@ -109,8 +110,8 @@ export class LiquidationService {
   }
 
   private async checkPositionsForLiquidation(): Promise<void> {
-    const positions = await this.positionRepository.find({
-      where: { status: PositionStatus.OPEN },
+    const positions = await this.databaseService.select<Position>('positions', {
+      eq: { status: PositionStatus.OPEN },
     });
 
     for (const position of positions) {
@@ -149,13 +150,16 @@ export class LiquidationService {
     currentPrice: string,
   ): Promise<void> {
     try {
-      // Update position status
-      await this.positionRepository.update(position.id, {
-        status: PositionStatus.LIQUIDATED,
-        closedAt: new Date(),
-        closingPrice: currentPrice,
-        realizedPnl: '0', // No PnL in liquidation - all margin is seized
-      });
+      await this.databaseService.update<Position>(
+        'positions',
+        {
+          status: PositionStatus.LIQUIDATED,
+          closedAt: new Date(),
+          closingPrice: currentPrice,
+          realizedPnl: '0',
+        },
+        { id: position.id },
+      );
 
       this.logger.log(
         `Position ${position.id} liquidated at price ${currentPrice}`,
@@ -167,8 +171,8 @@ export class LiquidationService {
   }
 
   private async updateBorrowingFees(): Promise<void> {
-    const positions = await this.positionRepository.find({
-      where: { status: PositionStatus.OPEN },
+    const positions = await this.databaseService.select<Position>('positions', {
+      eq: { status: PositionStatus.OPEN },
     });
     const now = new Date();
 
@@ -183,9 +187,14 @@ export class LiquidationService {
           (1000 * 60 * 60);
 
         if (hoursSinceLastUpdate >= 1) {
-          const market = await this.marketRepository.findOne({
-            where: { id: position.marketId },
-          });
+          const [market] = await this.databaseService.select<Market>(
+            'markets',
+            {
+              eq: { id: position.marketId },
+              limit: 1,
+            },
+          );
+
           if (!market) {
             throw new Error('Market not found');
           }
@@ -225,16 +234,20 @@ export class LiquidationService {
           await this.marketService.addTradingFees(market.id, feeInToken);
 
           // Update position's accumulated borrowing fee and last update time
-          position.accumulatedBorrowingFee = add(
-            position.accumulatedBorrowingFee,
-            feeInToken,
+          await this.databaseService.update<Position>(
+            'positions',
+            {
+              accumulatedBorrowingFee: add(
+                position.accumulatedBorrowingFee,
+                feeInToken,
+              ),
+              lastBorrowingFeeUpdate: new Date(
+                position.lastBorrowingFeeUpdate.getTime() +
+                  hoursToCharge * 60 * 60 * 1000,
+              ),
+            },
+            { id: position.id },
           );
-          position.lastBorrowingFeeUpdate = new Date(
-            position.lastBorrowingFeeUpdate.getTime() +
-              hoursToCharge * 60 * 60 * 1000,
-          );
-
-          await this.positionRepository.save(position);
 
           // Emit fee charged event
           this.eventsService.emitBorrowingFeeCharged({

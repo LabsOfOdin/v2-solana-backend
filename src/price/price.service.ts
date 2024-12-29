@@ -3,10 +3,9 @@ import { Inject, Injectable } from '@nestjs/common';
 import { RateLimiter } from 'limiter';
 import { Cache } from 'cache-manager';
 import * as WebSocket from 'ws';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { Market } from '../entities/market.entity';
-import { TokenType } from '../margin/types/token.types';
+import { DatabaseService } from 'src/database/database.service';
+import { MarketService } from 'src/market/market.service';
 
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
@@ -43,8 +42,8 @@ export class PriceService {
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
-    @InjectRepository(Market)
-    private marketRepository: Repository<Market>,
+    private readonly databaseService: DatabaseService,
+    private readonly marketService: MarketService,
   ) {
     // Initialize WebSocket connections
     this.connectBinanceWebSocket();
@@ -57,7 +56,7 @@ export class PriceService {
    */
 
   async getCurrentPrice(marketId: string): Promise<string> {
-    const market = await this.getMarketFromMarketId(marketId);
+    const market = await this.marketService.getMarketById(marketId);
 
     const price = await this.getDexPrice(market.tokenAddress, market.symbol);
 
@@ -393,32 +392,6 @@ export class PriceService {
       if (history[i].price < lowerBound || history[i].price > upperBound) {
         history.splice(i, 1);
       }
-    }
-  }
-
-  private async getMarketFromMarketId(marketId: string): Promise<Market> {
-    const cacheKey = `market-${marketId}`;
-
-    const cachedMarket = await this.cacheManager.get<Market>(cacheKey);
-    if (cachedMarket) {
-      return cachedMarket;
-    }
-
-    try {
-      const market = await this.marketRepository.findOne({
-        where: { id: marketId },
-      });
-
-      // 0 means cache forever
-      await this.cacheManager.set(cacheKey, market, 0);
-
-      return market;
-    } catch (error) {
-      console.error(
-        `Error fetching market with ID ${marketId}:`,
-        this.getErrorMessage(error),
-      );
-      throw new Error(`Market with ID ${marketId} not found`);
     }
   }
 

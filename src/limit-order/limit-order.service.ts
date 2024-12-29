@@ -1,6 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { LimitOrder } from '../entities/limit-order.entity';
 import { PriceService } from '../price/price.service';
 import { TradeService } from '../trade/trade.service';
@@ -14,6 +12,7 @@ import {
 } from '../types/trade.types';
 import { Market } from '../entities/market.entity';
 import { compare, divide, multiply } from 'src/lib/math';
+import { DatabaseService } from '../database/database.service';
 
 @Injectable()
 export class LimitOrderService {
@@ -21,14 +20,11 @@ export class LimitOrderService {
   private readonly checkInterval = 10000; // 10 seconds
 
   constructor(
-    @InjectRepository(LimitOrder)
-    private readonly limitOrderRepository: Repository<LimitOrder>,
+    private readonly databaseService: DatabaseService,
     private readonly priceService: PriceService,
     private readonly tradeService: TradeService,
     private readonly marginService: MarginService,
     private readonly eventsService: EventsService,
-    @InjectRepository(Market)
-    private readonly marketRepository: Repository<Market>,
   ) {
     // Start monitoring limit orders
     this.startMonitoring();
@@ -77,8 +73,9 @@ export class LimitOrderService {
     }
 
     // Get market details
-    const market = await this.marketRepository.findOne({
-      where: { id: orderRequest.marketId },
+    const [market] = await this.databaseService.select<Market>('markets', {
+      eq: { id: orderRequest.marketId },
+      limit: 1,
     });
 
     if (!market) {
@@ -86,20 +83,21 @@ export class LimitOrderService {
     }
 
     // Create limit order
-    const limitOrder = this.limitOrderRepository.create({
-      userId: orderRequest.userId,
-      marketId: orderRequest.marketId,
-      side: orderRequest.side,
-      size: orderRequest.size,
-      price: orderRequest.price,
-      leverage: orderRequest.leverage,
-      token: orderRequest.token,
-      symbol: market.symbol,
-      requiredMargin: divide(requiredMargin, marginPrice),
-      status: OrderStatus.OPEN,
-    });
-
-    const savedOrder = await this.limitOrderRepository.save(limitOrder);
+    const [savedOrder] = await this.databaseService.insert<LimitOrder>(
+      'limit_orders',
+      {
+        userId: orderRequest.userId,
+        marketId: orderRequest.marketId,
+        side: orderRequest.side,
+        size: orderRequest.size,
+        price: orderRequest.price,
+        leverage: orderRequest.leverage,
+        token: orderRequest.token,
+        symbol: market.symbol,
+        requiredMargin: divide(requiredMargin, marginPrice),
+        status: OrderStatus.OPEN,
+      },
+    );
 
     // Emit position update event
     this.eventsService.emitPositionsUpdate();
@@ -108,9 +106,13 @@ export class LimitOrderService {
   }
 
   async cancelLimitOrder(orderId: string, userId: string): Promise<void> {
-    const order = await this.limitOrderRepository.findOne({
-      where: { id: orderId, userId },
-    });
+    const [order] = await this.databaseService.select<LimitOrder>(
+      'limit_orders',
+      {
+        eq: { id: orderId, userId },
+        limit: 1,
+      },
+    );
 
     if (!order) {
       throw new Error('Limit order not found');
@@ -120,19 +122,23 @@ export class LimitOrderService {
       throw new Error('Order cannot be cancelled');
     }
 
-    // Update order status
-    await this.limitOrderRepository.update(orderId, {
-      status: OrderStatus.CANCELLED,
-    });
+    await this.databaseService.update<LimitOrder>(
+      'limit_orders',
+      { status: OrderStatus.CANCELLED },
+      { id: orderId },
+    );
 
     // Emit position update event
     this.eventsService.emitPositionsUpdate();
   }
 
   private async checkAndExecuteLimitOrders(): Promise<void> {
-    const openOrders = await this.limitOrderRepository.find({
-      where: { status: OrderStatus.OPEN },
-    });
+    const openOrders = await this.databaseService.select<LimitOrder>(
+      'limit_orders',
+      {
+        eq: { status: OrderStatus.OPEN },
+      },
+    );
 
     for (const order of openOrders) {
       try {
@@ -187,9 +193,11 @@ export class LimitOrderService {
 
       if (compare(availableBalanceUsd, requiredMarginUsd) < 0) {
         // Cancel the order if insufficient margin
-        await this.limitOrderRepository.update(order.id, {
-          status: OrderStatus.CANCELLED,
-        });
+        await this.databaseService.update<LimitOrder>(
+          'limit_orders',
+          { status: OrderStatus.CANCELLED },
+          { id: order.id },
+        );
         this.logger.warn(
           `Cancelled limit order ${order.id} due to insufficient margin`,
         );
@@ -211,9 +219,11 @@ export class LimitOrderService {
       await this.tradeService.openPosition(orderRequest);
 
       // Update order status
-      await this.limitOrderRepository.update(order.id, {
-        status: OrderStatus.FILLED,
-      });
+      await this.databaseService.update<LimitOrder>(
+        'limit_orders',
+        { status: OrderStatus.FILLED },
+        { id: order.id },
+      );
 
       // Emit position update event
       this.eventsService.emitPositionsUpdate();
@@ -226,16 +236,16 @@ export class LimitOrderService {
   }
 
   async getUserLimitOrders(userId: string): Promise<LimitOrder[]> {
-    return this.limitOrderRepository.find({
-      where: { userId },
-      order: { createdAt: 'DESC' },
+    return this.databaseService.select<LimitOrder>('limit_orders', {
+      eq: { userId },
+      order: { column: 'created_at', ascending: false },
     });
   }
 
   async getMarketLimitOrders(marketId: string): Promise<LimitOrder[]> {
-    return this.limitOrderRepository.find({
-      where: { marketId, status: OrderStatus.OPEN },
-      order: { price: 'ASC' },
+    return this.databaseService.select<LimitOrder>('limit_orders', {
+      eq: { marketId, status: OrderStatus.OPEN },
+      order: { column: 'price', ascending: true },
     });
   }
 }

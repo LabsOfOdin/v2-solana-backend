@@ -1,4 +1,4 @@
-import { TokenType } from '../margin/types/token.types';
+import { TokenType } from './token.types';
 
 export enum OrderType {
   MARKET = 'MARKET',

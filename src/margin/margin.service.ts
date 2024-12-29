@@ -1,16 +1,15 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DatabaseService } from '../database/database.service';
 import {
   WithdrawalRequest,
   WithdrawalStatus,
 } from '../entities/withdrawal-request.entity';
 import { MarginLock } from '../entities/margin-lock.entity';
 import { User } from '../entities/user.entity';
-import { TokenType } from './types/token.types';
+import { TokenType } from 'src/types/token.types';
 import { InvalidTokenError, InsufficientMarginError } from '../common/errors';
 import { UserService } from '../user/user.service';
-import { MarginBalance } from './entities/margin-balance.entity';
+import { MarginBalance } from 'src/entities/margin-balance.entity';
 import { SolanaService } from '../solana/solana.service';
 import { add, compare, subtract } from 'src/lib/math';
 
@@ -28,10 +27,7 @@ export class MarginService {
   private readonly SUPPORTED_TOKENS = new Set([TokenType.SOL, TokenType.USDC]);
 
   constructor(
-    @InjectRepository(WithdrawalRequest)
-    private readonly withdrawalRequestRepository: Repository<WithdrawalRequest>,
-    @InjectRepository(MarginLock)
-    private readonly marginLockRepository: Repository<MarginLock>,
+    private readonly databaseService: DatabaseService,
     private readonly userService: UserService,
     private readonly solanaService: SolanaService,
   ) {}
@@ -114,15 +110,19 @@ export class MarginService {
     );
 
     // Create withdrawal request
-    const withdrawalRequest = this.withdrawalRequestRepository.create({
-      userId: user.publicKey,
-      amount,
-      token,
-      destinationAddress,
-      status: WithdrawalStatus.PENDING,
-    });
+    const [withdrawalRequest] =
+      await this.databaseService.insert<WithdrawalRequest>(
+        'withdrawal_requests',
+        {
+          userId: user.publicKey,
+          amount,
+          token,
+          destinationAddress,
+          status: WithdrawalStatus.PENDING,
+        },
+      );
 
-    return this.withdrawalRequestRepository.save(withdrawalRequest);
+    return withdrawalRequest;
   }
 
   async lockMargin(
@@ -141,13 +141,12 @@ export class MarginService {
     }
 
     // Create margin lock
-    const marginLock = this.marginLockRepository.create({
+    await this.databaseService.insert<MarginLock>('margin_locks', {
       userId,
       tradeId,
       token,
       amount,
     });
-    await this.marginLockRepository.save(marginLock);
 
     // Update balances
     const newAvailableBalance = subtract(
@@ -171,12 +170,15 @@ export class MarginService {
     tradeId: string,
     pnl: string = '0',
   ): Promise<void> {
-    const [marginLock, marginBalance] = await Promise.all([
-      this.marginLockRepository.findOne({
-        where: { userId, tradeId, token },
+    const [marginLocks, marginBalance] = await Promise.all([
+      this.databaseService.select<MarginLock>('margin_locks', {
+        eq: { userId, tradeId, token },
+        limit: 1,
       }),
       this.userService.getMarginBalance(userId, token),
     ]);
+
+    const marginLock = marginLocks[0];
 
     if (!marginLock) {
       throw new Error('Margin lock not found');
@@ -204,7 +206,11 @@ export class MarginService {
     );
 
     // Remove margin lock
-    await this.marginLockRepository.remove(marginLock);
+    await this.databaseService.delete('margin_locks', {
+      userId,
+      tradeId,
+      token,
+    });
   }
 
   async getBalance(userId: string, token: TokenType): Promise<MarginBalance> {
@@ -216,27 +222,43 @@ export class MarginService {
     withdrawalId: string,
     txHash: string,
   ): Promise<WithdrawalRequest> {
-    const withdrawal = await this.withdrawalRequestRepository.findOne({
-      where: { id: withdrawalId },
-    });
+    const [withdrawal] = await this.databaseService.select<WithdrawalRequest>(
+      'withdrawal_requests',
+      {
+        eq: { id: withdrawalId },
+        limit: 1,
+      },
+    );
 
     if (!withdrawal || withdrawal.status !== WithdrawalStatus.PENDING) {
       throw new Error('Invalid withdrawal request');
     }
 
     // Update withdrawal status
-    withdrawal.status = WithdrawalStatus.COMPLETED;
-    withdrawal.txHash = txHash;
-    return this.withdrawalRequestRepository.save(withdrawal);
+    const [updatedWithdrawal] =
+      await this.databaseService.update<WithdrawalRequest>(
+        'withdrawal_requests',
+        {
+          status: WithdrawalStatus.COMPLETED,
+          txHash,
+        },
+        { id: withdrawalId },
+      );
+
+    return updatedWithdrawal;
   }
 
   async rejectWithdrawal(
     withdrawalId: string,
     reason: string,
   ): Promise<WithdrawalRequest> {
-    const withdrawal = await this.withdrawalRequestRepository.findOne({
-      where: { id: withdrawalId },
-    });
+    const [withdrawal] = await this.databaseService.select<WithdrawalRequest>(
+      'withdrawal_requests',
+      {
+        eq: { id: withdrawalId },
+        limit: 1,
+      },
+    );
 
     if (!withdrawal || withdrawal.status !== WithdrawalStatus.PENDING) {
       throw new Error('Invalid withdrawal request');
@@ -262,9 +284,17 @@ export class MarginService {
     );
 
     // Update withdrawal status
-    withdrawal.status = WithdrawalStatus.REJECTED;
-    withdrawal.processingNotes = reason;
-    return this.withdrawalRequestRepository.save(withdrawal);
+    const [updatedWithdrawal] =
+      await this.databaseService.update<WithdrawalRequest>(
+        'withdrawal_requests',
+        {
+          status: WithdrawalStatus.REJECTED,
+          processingNotes: reason,
+        },
+        { id: withdrawalId },
+      );
+
+    return updatedWithdrawal;
   }
 
   /**

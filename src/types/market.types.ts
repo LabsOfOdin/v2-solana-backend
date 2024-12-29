@@ -28,6 +28,7 @@ export interface UpdateMarketDto {
   poolAddress?: string;
   maxFundingRate?: string;
   maxFundingVelocity?: string;
+  impactPool?: string;
 }
 
 export interface MarketInfo {

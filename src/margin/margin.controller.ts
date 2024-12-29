@@ -8,8 +8,8 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { MarginService } from './margin.service';
-import { TokenType } from './types/token.types';
-import { MarginBalance } from './entities/margin-balance.entity';
+import { TokenType } from 'src/types/token.types';
+import { MarginBalance } from 'src/entities/margin-balance.entity';
 import { UserService } from '../user/user.service';
 
 @Controller('margin')

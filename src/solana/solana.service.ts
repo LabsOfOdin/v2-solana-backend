@@ -5,8 +5,8 @@ import {
   ParsedTransactionWithMeta,
   LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
-import { TokenType } from '../margin/types/token.types';
-import { getSolanaConfig } from '../common/config';
+import { TokenType } from 'src/types/token.types';
+import { getSolanaConfig } from 'src/common/config';
 
 @Injectable()
 export class SolanaService {

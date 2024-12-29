@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Subject } from 'rxjs';
-import { Position } from '../entities/position.entity';
-import { TokenType } from '../margin/types/token.types';
+import { TokenType } from 'src/types/token.types';
 
 interface BorrowingFeeEvent {
   userId: string;
