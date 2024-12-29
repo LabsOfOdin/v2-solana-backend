@@ -1,11 +1,10 @@
-import { Module } from '@nestjs/common';
+import { forwardRef, Module } from '@nestjs/common';
 import { PriceService } from './price.service';
 import { PriceController } from './price.controller';
-import { Market } from '../entities/market.entity';
-import { DatabaseModule } from 'src/database/database.module';
+import { MarketModule } from 'src/market/market.module';
 
 @Module({
-  imports: [DatabaseModule],
+  imports: [forwardRef(() => MarketModule)],
   controllers: [PriceController],
   providers: [PriceService],
   exports: [PriceService],

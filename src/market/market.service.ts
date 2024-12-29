@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ConflictException,
   Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { DatabaseService } from '../database/database.service';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
@@ -22,6 +23,7 @@ import { add } from 'src/lib/math';
 export class MarketService {
   constructor(
     private readonly databaseService: DatabaseService,
+    @Inject(forwardRef(() => PriceService))
     private readonly priceService: PriceService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
   ) {}

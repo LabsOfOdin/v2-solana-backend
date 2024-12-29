@@ -26,6 +26,7 @@ export class DatabaseService {
     query: {
       select?: string;
       eq?: Record<string, any>;
+      and?: Array<Record<string, any>>;
       or?: Array<Record<string, any>>;
       in?: Record<string, any[]>;
       gt?: Record<string, any>;
@@ -43,6 +44,18 @@ export class DatabaseService {
     if (query.eq) {
       Object.entries(query.eq).forEach(([column, value]) => {
         queryBuilder = queryBuilder.eq(column, value);
+      });
+    }
+
+    if (query.and) {
+      query.and.forEach((condition) => {
+        Object.entries(condition).forEach(([column, value]) => {
+          if (value && typeof value === 'object' && 'notNull' in value) {
+            queryBuilder = queryBuilder.not(column, 'is', null);
+          } else {
+            queryBuilder = queryBuilder.eq(column, value);
+          }
+        });
       });
     }
 

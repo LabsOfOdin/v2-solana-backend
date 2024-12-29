@@ -1,10 +1,8 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, forwardRef } from '@nestjs/common';
 import { RateLimiter } from 'limiter';
 import { Cache } from 'cache-manager';
 import * as WebSocket from 'ws';
-import { Market } from '../entities/market.entity';
-import { DatabaseService } from 'src/database/database.service';
 import { MarketService } from 'src/market/market.service';
 
 /**
@@ -42,7 +40,7 @@ export class PriceService {
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
-    private readonly databaseService: DatabaseService,
+    @Inject(forwardRef(() => MarketService))
     private readonly marketService: MarketService,
   ) {
     // Initialize WebSocket connections

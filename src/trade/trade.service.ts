@@ -69,18 +69,13 @@ export class TradeService {
     const positions: Position[] = await this.databaseService.select(
       'positions',
       {
-        or: [
+        and: [
+          { status: 'OPEN' },
           {
-            eq: {
-              status: 'OPEN',
-            },
-            notNull: ['stopLossPrice'],
-          },
-          {
-            eq: {
-              status: 'OPEN',
-            },
-            notNull: ['takeProfitPrice'],
+            or: [
+              { stopLossPrice: { notNull: true } },
+              { takeProfitPrice: { notNull: true } },
+            ],
           },
         ],
       },
