@@ -75,8 +75,14 @@ export class TradeService {
   private async checkPositionsForStopLossAndTakeProfit(): Promise<void> {
     const positions = await this.positionRepository.find({
       where: [
-        { stopLossPrice: Not(IsNull()) },
-        { takeProfitPrice: Not(IsNull()) },
+        {
+          stopLossPrice: Not(IsNull()),
+          status: PositionStatus.OPEN,
+        },
+        {
+          takeProfitPrice: Not(IsNull()),
+          status: PositionStatus.OPEN,
+        },
       ],
     });
 

@@ -33,8 +33,10 @@ export class LiquidationService {
   private async startMonitoring() {
     setInterval(async () => {
       try {
-        await this.checkPositionsForLiquidation();
-        await this.updateBorrowingFees();
+        await Promise.all([
+          this.checkPositionsForLiquidation(),
+          this.updateBorrowingFees(),
+        ]);
       } catch (error) {
         this.logger.error('Error checking positions for liquidation:', error);
       }
