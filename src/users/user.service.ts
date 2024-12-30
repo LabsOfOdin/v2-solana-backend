@@ -7,9 +7,6 @@ import { InsufficientMarginError } from '../common/errors';
 import { compare } from 'src/lib/math';
 import { add, subtract } from 'src/lib/math';
 import { DatabaseService } from 'src/database/database.service';
-import { Position } from 'src/entities/position.entity';
-import { LPPosition } from 'src/entities/lp-position.entity';
-import { LimitOrder } from 'src/entities/limit-order.entity';
 
 @Injectable()
 export class UserService {
@@ -18,13 +15,10 @@ export class UserService {
   async createUser(publicKey: string): Promise<User> {
     const date: Date = new Date();
 
+    console.log('Creating user: ', publicKey);
+
     const defaultUser = {
       publicKey,
-      positions: [] as Position[],
-      marginLocks: [] as MarginLock[],
-      lpPositions: [] as LPPosition[],
-      marginBalances: [] as MarginBalance[],
-      limitOrders: [] as LimitOrder[],
       createdAt: date,
       updatedAt: date,
     };
