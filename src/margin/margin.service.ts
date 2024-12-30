@@ -12,6 +12,7 @@ import { UserService } from '../users/user.service';
 import { MarginBalance } from 'src/entities/margin-balance.entity';
 import { SolanaService } from '../solana/solana.service';
 import { add, compare, subtract } from 'src/lib/math';
+import { EventsService } from 'src/events/events.service';
 
 /**
  * @security checks:
@@ -30,6 +31,7 @@ export class MarginService {
     private readonly databaseService: DatabaseService,
     private readonly userService: UserService,
     private readonly solanaService: SolanaService,
+    private readonly eventsService: EventsService,
   ) {}
 
   /**
@@ -73,6 +75,8 @@ export class MarginService {
       marginBalance.lockedBalance,
       marginBalance.unrealizedPnl,
     );
+
+    this.eventsService.emitBalancesUpdate(user.publicKey);
 
     return this.userService.getMarginBalance(user.publicKey, token);
   }
@@ -166,6 +170,8 @@ export class MarginService {
       newLockedBalance,
       marginBalance.unrealizedPnl,
     );
+
+    this.eventsService.emitBalancesUpdate(userId);
   }
 
   async releaseMargin(
@@ -215,6 +221,8 @@ export class MarginService {
       tradeId,
       token,
     });
+
+    this.eventsService.emitBalancesUpdate(userId);
   }
 
   async getBalance(userId: string, token: TokenType): Promise<MarginBalance> {
@@ -248,6 +256,8 @@ export class MarginService {
         },
         { id: withdrawalId },
       );
+
+    this.eventsService.emitBalancesUpdate(withdrawal.userId);
 
     return updatedWithdrawal;
   }
@@ -297,6 +307,8 @@ export class MarginService {
         },
         { id: withdrawalId },
       );
+
+    this.eventsService.emitBalancesUpdate(withdrawal.userId);
 
     return updatedWithdrawal;
   }

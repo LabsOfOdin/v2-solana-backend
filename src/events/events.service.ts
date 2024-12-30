@@ -20,9 +20,19 @@ interface PositionUpdate {
 @Injectable()
 export class EventsService {
   private positionsSubject = new Subject<PositionUpdate>();
+  private balancesSubject = new Subject<{
+    userId: string;
+    timestamp: string;
+  }>();
 
   getPositionsEventObservable(userId: string) {
     return this.positionsSubject
+      .asObservable()
+      .pipe(filter((update) => update.userId === userId));
+  }
+
+  getBalancesEventObservable(userId: string) {
+    return this.balancesSubject
       .asObservable()
       .pipe(filter((update) => update.userId === userId));
   }
@@ -37,5 +47,12 @@ export class EventsService {
   emitBorrowingFeeCharged(event: BorrowingFeeEvent): void {
     // In production, this would emit the event to a message queue or websocket
     console.log('Borrowing fee charged:', event);
+  }
+
+  emitBalancesUpdate(userId: string) {
+    this.balancesSubject.next({
+      userId,
+      timestamp: new Date().toISOString(),
+    });
   }
 }

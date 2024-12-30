@@ -21,4 +21,19 @@ export class EventsController {
       ),
     );
   }
+
+  @Sse('balances')
+  balances(@Query('userId') userId: string): Observable<MessageEvent> {
+    return this.eventsService.getBalancesEventObservable(userId).pipe(
+      map(
+        (update) =>
+          ({
+            data: {
+              userId: update.userId,
+              timestamp: update.timestamp,
+            },
+          }) as MessageEvent,
+      ),
+    );
+  }
 }
