@@ -35,8 +35,6 @@ export class MarketService {
     await Promise.all(
       markets.map((market) => this.calculateFundingRate(market)),
     );
-
-    console.log('Funding rates updated for all markets');
   }
 
   async createMarket(dto: CreateMarketDto): Promise<Market> {

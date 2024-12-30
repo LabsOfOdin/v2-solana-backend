@@ -66,41 +66,61 @@ export class TradeService {
   }
 
   private async checkPositionsForStopLossAndTakeProfit(): Promise<void> {
-    const positions: Position[] = await this.databaseService.select(
-      'positions',
-      {
+    const positionsWithStopLosses: Position[] =
+      await this.databaseService.select('positions', {
         and: [
           { status: 'OPEN' },
           {
-            or: [
-              { stopLossPrice: { notNull: true } },
-              { takeProfitPrice: { notNull: true } },
-            ],
+            stopLossPrice: { notNull: true },
           },
         ],
-      },
-    );
+      });
 
-    for (const position of positions) {
-      try {
-        const currentPrice = await this.priceService.getCurrentPrice(
-          position.marketId,
-        );
+    const positionsWithTakeProfits: Position[] =
+      await this.databaseService.select('positions', {
+        and: [{ status: 'OPEN' }, { takeProfitPrice: { notNull: true } }],
+      });
 
-        if (this.shouldTriggerOrderClose(position, currentPrice, 'stopLoss')) {
-          await this.closePosition(position.id, position.userId, position.size);
-          continue;
+    await Promise.all([
+      ...positionsWithStopLosses.map(async (position) => {
+        try {
+          const currentPrice = await this.priceService.getCurrentPrice(
+            position.marketId,
+          );
+
+          if (
+            this.shouldTriggerOrderClose(position, currentPrice, 'stopLoss')
+          ) {
+            await this.closePosition(
+              position.id,
+              position.userId,
+              position.size,
+            );
+          }
+        } catch (error) {
+          console.error(`Error processing position ${position.id}:`, error);
         }
+      }),
+      ...positionsWithTakeProfits.map(async (position) => {
+        try {
+          const currentPrice = await this.priceService.getCurrentPrice(
+            position.marketId,
+          );
 
-        if (
-          this.shouldTriggerOrderClose(position, currentPrice, 'takeProfit')
-        ) {
-          await this.closePosition(position.id, position.userId, position.size);
+          if (
+            this.shouldTriggerOrderClose(position, currentPrice, 'takeProfit')
+          ) {
+            await this.closePosition(
+              position.id,
+              position.userId,
+              position.size,
+            );
+          }
+        } catch (error) {
+          console.error(`Error processing position ${position.id}:`, error);
         }
-      } catch (error) {
-        console.error(`Error processing position ${position.id}:`, error);
-      }
-    }
+      }),
+    ]);
   }
 
   private shouldTriggerOrderClose(
