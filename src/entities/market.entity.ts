@@ -23,6 +23,7 @@ export interface Market {
   status: MarketStatus;
   positions: Position[];
   openLimitOrders: LimitOrder[];
+  availableLiquidity: string;
   createdAt: Date;
   updatedAt: Date;
 }

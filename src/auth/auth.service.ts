@@ -1,6 +1,6 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { UserService } from '../user/user.service';
+import { UserService } from '../users/user.service';
 import bs58 from 'bs58';
 import * as nacl from 'tweetnacl';
 import { User } from '../entities/user.entity';

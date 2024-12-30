@@ -36,20 +36,6 @@ export class MarketController {
     return this.marketService.getFundingRate(id);
   }
 
-  @Get(':id/funding-history')
-  async getFundingHistory(
-    @Param('id') id: string,
-    @Query('startTime') startTime?: string,
-    @Query('endTime') endTime?: string,
-  ) {
-    return this.marketService.getFundingHistory(id, startTime, endTime);
-  }
-
-  @Get(':id/stats')
-  async getMarketStats(@Param('id') id: string) {
-    return this.marketService.getMarketStats(id);
-  }
-
   @Post()
   @UseGuards(PinAuthGuard)
   async createMarket(@Body() dto: CreateMarketDto) {

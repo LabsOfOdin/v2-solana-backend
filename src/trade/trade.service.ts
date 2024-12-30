@@ -33,6 +33,7 @@ import {
   subtract,
 } from 'src/lib/math';
 import { DatabaseService } from 'src/database/database.service';
+import { StatsService } from '../stats/stats.service';
 
 @Injectable()
 export class TradeService {
@@ -41,11 +42,11 @@ export class TradeService {
   constructor(
     private readonly databaseService: DatabaseService,
     private readonly priceService: PriceService,
-    private readonly liquidityService: LiquidityService,
     private readonly cacheService: CacheService,
     private readonly marginService: MarginService,
     private readonly eventsService: EventsService,
     private readonly marketService: MarketService,
+    private readonly statsService: StatsService,
   ) {
     this.startMonitoring();
   }
@@ -185,6 +186,9 @@ export class TradeService {
 
   async openPosition(orderRequest: OrderRequest): Promise<boolean> {
     try {
+      // PART 1: Validations and Data Gathering
+      // -------------------------------------
+
       // 1. Validate basic input parameters
       if (!orderRequest || !orderRequest.marketId || !orderRequest.userId) {
         throw new BadRequestException('Invalid order request parameters');
@@ -206,86 +210,74 @@ export class TradeService {
         throw new NotFoundException('Market not found');
       }
 
-      // 3. Validate leverage
+      // 3. Validate leverage and liquidity
       const leverage = parseFloat(orderRequest.leverage);
       if (leverage === 0 || leverage > parseFloat(market.maxLeverage)) {
         throw new BadRequestException('Invalid Leverage');
       }
-
-      // 4. Fetch current market price
-      let marketPrice: string;
-      try {
-        marketPrice = await this.priceService.getCurrentPrice(
-          orderRequest.marketId,
-        );
-      } catch {
-        throw new InternalServerErrorException('Failed to fetch market price');
+      const currentOpenInterest =
+        market.longOpenInterest + market.shortOpenInterest;
+      if (orderRequest.size + currentOpenInterest > market.availableLiquidity) {
+        throw new BadRequestException('Insufficient liquidity');
       }
 
-      // 5. Calculate entry price with slippage/price impact
-      const entryPrice = await this.calculateEntryPrice(
+      // PART 2: Calculations and Price Checks
+      // -------------------------------------
+
+      // 4. Fetch current market price and calculate entry price
+      const marketPrice = await this.priceService.getCurrentPrice(
+        orderRequest.marketId,
+      );
+      const { entryPrice, updatedImpactPool } = await this.calculateEntryPrice(
         marketPrice,
         orderRequest,
       );
 
-      // 6. Calculate required margin (USD)
+      // 5. Calculate required margin and validate user's balance
       const requiredMarginUSD =
         await this.calculateRequiredMargin(orderRequest);
-
-      // 7. Get user's margin balance
-      let marginBalance: MarginBalance;
-      try {
-        marginBalance = await this.marginService.getBalance(
-          orderRequest.userId,
-          orderRequest.token,
-        );
-      } catch {
-        throw new InternalServerErrorException(
-          'Failed to fetch margin balance',
-        );
-      }
-
+      const marginBalance = await this.marginService.getBalance(
+        orderRequest.userId,
+        orderRequest.token,
+      );
       const solPrice = await this.priceService.getSolPrice();
 
-      // 8. Convert available balance to USD if token is SOL
+      // 6. Convert and validate available balance
       let availableMarginUSD = marginBalance.availableBalance;
       const isSol = orderRequest.token === TokenType.SOL;
       if (isSol) {
         availableMarginUSD = multiply(availableMarginUSD, solPrice);
       }
 
-      // 9. Check if user has enough margin
       if (compare(availableMarginUSD, requiredMarginUSD) < 0) {
         throw new Error('Insufficient margin');
       }
 
-      // 10. Calculate amount to lock (token-based)
+      // 7. Calculate amount to lock
       let amountToLock = requiredMarginUSD;
       if (isSol) {
         amountToLock = divide(requiredMarginUSD, solPrice);
       }
 
-      // 11. Lock margin
+      // PART 3: Database Updates (all or nothing)
+      // -------------------------------------
+
       const positionId = crypto.randomUUID();
-      try {
-        await this.marginService.lockMargin(
-          orderRequest.userId,
-          orderRequest.token,
-          amountToLock,
-          positionId,
-        );
-      } catch {
-        throw new InternalServerErrorException('Failed to lock margin');
-      }
 
-      // 12. Validate liquidity
-      try {
-        await this.liquidityService.validateLiquidityForTrade(orderRequest);
-      } catch {
-        throw new BadRequestException('Insufficient liquidity for trade');
-      }
+      // 1. Lock margin
+      await this.marginService.lockMargin(
+        orderRequest.userId,
+        orderRequest.token,
+        amountToLock,
+        positionId,
+      );
 
-      // 13. Create position
+      // 2. Update market's impact pool
+      await this.marketService.updateMarket(market.id, {
+        impactPool: updatedImpactPool,
+      });
+
+      // 3. Create position
       const [position] = await this.databaseService.insert('positions', {
         id: positionId,
         userId: orderRequest.userId,
@@ -304,14 +296,22 @@ export class TradeService {
         status: PositionStatus.OPEN,
       });
 
-      // 14. Emit position update event
-      this.eventsService.emitPositionsUpdate();
+      // PART 4: Non-critical updates
+      // -------------------------------------
+
+      // Emit position update event (non-critical)
+      try {
+        this.eventsService.emitPositionsUpdate(orderRequest.userId);
+      } catch (error) {
+        console.error('Failed to emit position update:', error);
+      }
 
       return position.status === PositionStatus.OPEN;
     } catch (error) {
       if (
         error instanceof BadRequestException ||
-        error instanceof InternalServerErrorException
+        error instanceof InternalServerErrorException ||
+        error instanceof NotFoundException
       ) {
         throw error;
       }
@@ -325,20 +325,18 @@ export class TradeService {
     sizeDelta: string,
   ): Promise<Position> {
     try {
+      // PART 1: Validations and Data Gathering
+      // -------------------------------------
+
       // 1. Validate inputs
       if (!positionId) throw new BadRequestException('Position ID is required');
       if (!userId) throw new BadRequestException('User ID is required');
       if (!sizeDelta) throw new BadRequestException('Size delta is required');
 
       // 2. Retrieve position
-      let position: Position;
-      try {
-        position = await this.getPosition(positionId);
-      } catch (error) {
-        if (error instanceof NotFoundException) throw error;
-        throw new InternalServerErrorException(
-          `Failed to fetch position: ${error.message}`,
-        );
+      const position = await this.getPosition(positionId);
+      if (!position) {
+        throw new NotFoundException(`Position ${positionId} not found`);
       }
 
       // 3. Authorization check
@@ -358,25 +356,21 @@ export class TradeService {
       const isPartialClose = closeSizeComparison < 0;
       const isFullClose = closeSizeComparison === 0;
 
-      // 5. Fetch current price
-      let currentPrice: string = await this.priceService.getCurrentPrice(
+      // PART 2: Calculations
+      // -------------------------------------
+
+      // 5. Calculate all necessary values
+      const currentPrice = await this.priceService.getCurrentPrice(
         position.marketId,
       );
-
       const remainingSize = subtract(position.size, sizeDelta);
-
-      // 6. Calculate realized PnL
       const realizedPnlUSD = this.calculatePnl(
         position.side,
         sizeDelta,
         position.entryPrice,
         currentPrice,
       );
-
-      // 7. Fetch SOL price
       const solPrice = await this.priceService.getSolPrice();
-
-      // 8. Calculate proportions for margin release
       const closeProportion = divide(sizeDelta, position.size);
       const solMarginToRelease = multiply(
         position.lockedMarginSOL,
@@ -386,122 +380,112 @@ export class TradeService {
         position.lockedMarginUSDC,
         closeProportion,
       );
-
-      // Total locked value in USD (for distributing PnL across tokens)
       const totalLockedUSD = add(
         multiply(solMarginToRelease, solPrice),
         usdcMarginToRelease,
       );
 
-      // 9. Release margin (and re-lock remaining if partial close)
-      try {
-        // For SOL
-        if (compare(solMarginToRelease, '0') > 0) {
-          const solShare = divide(
-            multiply(solMarginToRelease, solPrice),
-            totalLockedUSD,
+      // Calculate PnL distribution
+      const solShare = divide(
+        multiply(solMarginToRelease, solPrice),
+        totalLockedUSD,
+      );
+      const solPnL = divide(multiply(realizedPnlUSD, solShare), solPrice);
+      const usdcShare = divide(usdcMarginToRelease, totalLockedUSD);
+      const usdcPnL = multiply(realizedPnlUSD, usdcShare);
+
+      // Prepare the trade record
+      const tradeRecord: Trade = {
+        id: crypto.randomUUID(),
+        positionId: position.id,
+        userId: position.userId,
+        marketId: position.marketId,
+        side:
+          position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
+        size: sizeDelta,
+        price: currentPrice,
+        leverage: position.leverage,
+        realizedPnl: realizedPnlUSD,
+        fee: this.calculateFee(sizeDelta, currentPrice),
+        createdAt: new Date(),
+      };
+
+      // PART 3: Database Updates (all or nothing)
+      // -------------------------------------
+
+      // 1. Handle margin releases and re-locks
+      if (compare(solMarginToRelease, '0') > 0) {
+        if (isPartialClose) {
+          const remainingSolMargin = subtract(
+            position.lockedMarginSOL,
+            solMarginToRelease,
           );
-          const solPnL = divide(multiply(realizedPnlUSD, solShare), solPrice);
-
-          // Partial close
-          if (isPartialClose) {
-            const remainingSolMargin = subtract(
-              position.lockedMarginSOL,
-              solMarginToRelease,
-            );
-
-            // Release entire original lock
-            await this.marginService.releaseMargin(
+          await this.marginService.releaseMargin(
+            position.userId,
+            TokenType.SOL,
+            position.id,
+            position.lockedMarginSOL,
+          );
+          if (compare(remainingSolMargin, '0') > 0) {
+            await this.marginService.lockMargin(
               position.userId,
               TokenType.SOL,
+              remainingSolMargin,
               position.id,
-              position.lockedMarginSOL,
-            );
-
-            // Re-lock remaining
-            if (compare(remainingSolMargin, '0') > 0) {
-              await this.marginService.lockMargin(
-                position.userId,
-                TokenType.SOL,
-                remainingSolMargin,
-                position.id,
-              );
-            }
-          } else {
-            // Full close
-            await this.marginService.releaseMargin(
-              position.userId,
-              TokenType.SOL,
-              position.id,
-              solPnL,
             );
           }
+        } else {
+          await this.marginService.releaseMargin(
+            position.userId,
+            TokenType.SOL,
+            position.id,
+            solPnL,
+          );
         }
-
-        // For USDC
-        if (compare(usdcMarginToRelease, '0') > 0) {
-          const usdcShare = divide(usdcMarginToRelease, totalLockedUSD);
-          const usdcPnL = multiply(realizedPnlUSD, usdcShare);
-
-          // Partial close
-          if (isPartialClose) {
-            const remainingUsdcMargin = subtract(
-              position.lockedMarginUSDC,
-              usdcMarginToRelease,
-            );
-
-            // Release entire original lock
-            await this.marginService.releaseMargin(
-              position.userId,
-              TokenType.USDC,
-              position.id,
-              position.lockedMarginUSDC,
-            );
-
-            // Re-lock remaining
-            if (compare(remainingUsdcMargin, '0') > 0) {
-              await this.marginService.lockMargin(
-                position.userId,
-                TokenType.USDC,
-                remainingUsdcMargin,
-                position.id,
-              );
-            }
-          } else {
-            // Full close
-            await this.marginService.releaseMargin(
-              position.userId,
-              TokenType.USDC,
-              position.id,
-              usdcPnL,
-            );
-          }
-        }
-      } catch (error) {
-        throw new InternalServerErrorException(
-          `Failed to release margin: ${error.message}`,
-        );
       }
 
-      // 10. Update position in DB
-      let updatedPosition: Position;
-      try {
-        if (isFullClose) {
-          [updatedPosition] = await this.databaseService.update(
-            'positions',
-            {
+      if (compare(usdcMarginToRelease, '0') > 0) {
+        if (isPartialClose) {
+          const remainingUsdcMargin = subtract(
+            position.lockedMarginUSDC,
+            usdcMarginToRelease,
+          );
+          await this.marginService.releaseMargin(
+            position.userId,
+            TokenType.USDC,
+            position.id,
+            position.lockedMarginUSDC,
+          );
+          if (compare(remainingUsdcMargin, '0') > 0) {
+            await this.marginService.lockMargin(
+              position.userId,
+              TokenType.USDC,
+              remainingUsdcMargin,
+              position.id,
+            );
+          }
+        } else {
+          await this.marginService.releaseMargin(
+            position.userId,
+            TokenType.USDC,
+            position.id,
+            usdcPnL,
+          );
+        }
+      }
+
+      // 2. Update position
+      const [updatedPosition] = await this.databaseService.update(
+        'positions',
+        isFullClose
+          ? {
               ...position,
               status: PositionStatus.CLOSED,
               closedAt: new Date(),
               closingPrice: currentPrice,
               realizedPnl: realizedPnlUSD,
-            },
-            { id: position.id },
-          );
-        } else {
-          [updatedPosition] = await this.databaseService.update(
-            'positions',
-            {
+            }
+          : {
               ...position,
               size: remainingSize,
               lockedMarginSOL: subtract(
@@ -517,49 +501,25 @@ export class TradeService {
                 multiply(position.margin, closeProportion),
               ),
             },
-            { id: position.id },
-          );
-        }
-      } catch (error) {
-        throw new InternalServerErrorException(
-          `Failed to update position: ${error.message}`,
-        );
-      }
+        { id: position.id },
+      );
 
-      // 11. Record the trade
-      try {
-        await this.recordTrade({
-          id: crypto.randomUUID(),
-          positionId: position.id,
-          userId: position.userId,
-          marketId: position.marketId,
-          side:
-            position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
-          size: sizeDelta,
-          price: currentPrice,
-          leverage: position.leverage,
-          realizedPnl: realizedPnlUSD,
-          fee: this.calculateFee(sizeDelta, currentPrice),
-          createdAt: new Date(),
-          isPartialClose,
-        });
-      } catch (error) {
-        throw new InternalServerErrorException(
-          `Failed to record trade: ${error.message}`,
-        );
-      }
+      // 3. Record the trade
+      await this.recordTrade(tradeRecord);
 
-      // 12. Emit position update event (non-critical)
+      // PART 4: Non-critical updates
+      // -------------------------------------
+
+      // Emit position update event (non-critical)
       try {
-        this.eventsService.emitPositionsUpdate();
+        this.eventsService.emitPositionsUpdate(position.userId);
       } catch (error) {
         console.error('Failed to emit position update:', error);
       }
 
-      return updatedPosition;
+      return position;
     } catch (error) {
       console.error('Error in closePosition:', error);
-
       if (
         error instanceof BadRequestException ||
         error instanceof NotFoundException ||
@@ -568,7 +528,6 @@ export class TradeService {
       ) {
         throw error;
       }
-
       throw new InternalServerErrorException(
         `Failed to close position: ${error.message}`,
       );
@@ -581,6 +540,14 @@ export class TradeService {
     stopLossPrice: string | null,
   ): Promise<Position> {
     try {
+      // PART 1: Validations and Data Gathering
+      // -------------------------------------
+
+      // 1. Validate basic inputs and fetch position
+      if (!positionId) {
+        throw new BadRequestException('Position ID is required');
+      }
+
       const position = await this.getPosition(positionId);
 
       if (!position) {
@@ -599,7 +566,7 @@ export class TradeService {
         );
       }
 
-      // If stopLossPrice is null, we're removing the stop loss
+      // 2. Validate stop loss price if provided
       if (stopLossPrice !== null) {
         try {
           this.validateOrderPrice(
@@ -613,7 +580,9 @@ export class TradeService {
         }
       }
 
-      // Update position
+      // PART 2: Database Updates (all or nothing)
+      // -------------------------------------
+
       const [updatedPosition] = await this.databaseService.update(
         'positions',
         {
@@ -623,8 +592,15 @@ export class TradeService {
         { id: position.id },
       );
 
-      await this.invalidatePositionCache(positionId, userId);
-      this.eventsService.emitPositionsUpdate();
+      // PART 3: Non-critical updates
+      // -------------------------------------
+
+      try {
+        await this.invalidatePositionCache(positionId, userId);
+        this.eventsService.emitPositionsUpdate(userId);
+      } catch (error) {
+        console.error('Failed to perform non-critical updates:', error);
+      }
 
       return updatedPosition;
     } catch (error) {
@@ -645,6 +621,14 @@ export class TradeService {
     takeProfitPrice: string | null,
   ): Promise<Position> {
     try {
+      // PART 1: Validations and Data Gathering
+      // -------------------------------------
+
+      // 1. Validate basic inputs and fetch position
+      if (!positionId) {
+        throw new BadRequestException('Position ID is required');
+      }
+
       const position = await this.getPosition(positionId);
 
       if (!position) {
@@ -663,7 +647,7 @@ export class TradeService {
         );
       }
 
-      // If takeProfitPrice is null, we're removing the take profit
+      // 2. Validate take profit price if provided
       if (takeProfitPrice !== null) {
         try {
           this.validateOrderPrice(
@@ -677,7 +661,9 @@ export class TradeService {
         }
       }
 
-      // Update position
+      // PART 2: Database Updates (all or nothing)
+      // -------------------------------------
+
       const [updatedPosition] = await this.databaseService.update(
         'positions',
         {
@@ -687,8 +673,15 @@ export class TradeService {
         { id: position.id },
       );
 
-      await this.invalidatePositionCache(positionId, userId);
-      this.eventsService.emitPositionsUpdate();
+      // PART 3: Non-critical updates
+      // -------------------------------------
+
+      try {
+        await this.invalidatePositionCache(positionId, userId);
+        this.eventsService.emitPositionsUpdate(userId);
+      } catch (error) {
+        console.error('Failed to perform non-critical updates:', error);
+      }
 
       return updatedPosition;
     } catch (error) {
@@ -709,6 +702,14 @@ export class TradeService {
     marginDelta: string,
   ): Promise<Position> {
     try {
+      // PART 1: Validations and Data Gathering
+      // -------------------------------------
+
+      // 1. Validate basic inputs and fetch position
+      if (!positionId) {
+        throw new BadRequestException('Position ID is required');
+      }
+
       const position = await this.getPosition(positionId);
 
       if (!position) {
@@ -727,6 +728,7 @@ export class TradeService {
         );
       }
 
+      // 2. Fetch market and validate leverage constraints
       const market = await this.marketService.getMarketById(position.marketId);
 
       if (!market) {
@@ -772,7 +774,7 @@ export class TradeService {
         }
       }
 
-      // Calculate proportions for SOL and USDC based on current locked amounts
+      // 3. Calculate proportions and deltas
       const totalLockedUSD = add(
         multiply(
           position.lockedMarginSOL,
@@ -799,7 +801,10 @@ export class TradeService {
         subtract('1', solProportion),
       );
 
-      // Handle margin adjustments
+      // PART 2: Database Updates (all or nothing)
+      // -------------------------------------
+
+      // 1. Handle margin adjustments
       if (compare(marginDelta, '0') > 0) {
         // Deposit
         if (compare(marginDeltaSOL, '0') > 0) {
@@ -838,7 +843,7 @@ export class TradeService {
         }
       }
 
-      // Update position
+      // 2. Update position
       const [updatedPosition] = await this.databaseService.update(
         'positions',
         {
@@ -850,8 +855,15 @@ export class TradeService {
         { id: position.id },
       );
 
-      await this.invalidatePositionCache(positionId, userId);
-      this.eventsService.emitPositionsUpdate();
+      // PART 3: Non-critical updates
+      // -------------------------------------
+
+      try {
+        await this.invalidatePositionCache(positionId, userId);
+        this.eventsService.emitPositionsUpdate(userId);
+      } catch (error) {
+        console.error('Failed to perform non-critical updates:', error);
+      }
 
       return updatedPosition;
     } catch (error) {
@@ -873,7 +885,10 @@ export class TradeService {
   private async calculateEntryPrice(
     marketPrice: string,
     order: OrderRequest,
-  ): Promise<string> {
+  ): Promise<{
+    entryPrice: string;
+    updatedImpactPool: string;
+  }> {
     try {
       if (!marketPrice || !order) {
         throw new BadRequestException(
@@ -891,16 +906,55 @@ export class TradeService {
       // Calculate price impact
       const priceImpact = await this.calculatePriceImpact(order, market);
 
-      // Calculate slippage
-      const slippagePercentage = this.calculateSlippage(order.size);
-      const slippageMultiplier =
-        order.side === OrderSide.LONG
-          ? add('1', slippagePercentage)
-          : subtract('1', slippagePercentage);
+      console.log('Price impact: ', priceImpact);
 
-      // Apply both price impact and slippage
-      const impactedPrice = multiply(marketPrice, add('1', priceImpact));
-      return multiply(impactedPrice, slippageMultiplier);
+      const positivelyImpacted = compare(priceImpact, '0') > 0;
+
+      console.log('Positively impacted: ', positivelyImpacted);
+
+      // Calculate slippage
+      const slippagePercentage = this.calculateSlippage(
+        order.size,
+        priceImpact,
+        positivelyImpacted,
+      );
+
+      console.log('Slippage percentage: ', slippagePercentage);
+
+      console.log('Max slippage: ', order.maxSlippage);
+
+      if (compare(slippagePercentage, order.maxSlippage) > 0) {
+        throw new BadRequestException('Slippage exceeds max slippage');
+      }
+
+      // Calculate final capped impact
+      const cappedImpact = positivelyImpacted
+        ? compare(priceImpact, market.impactPool) > 0
+          ? market.impactPool
+          : priceImpact
+        : priceImpact;
+
+      // Calculate impact pool changes
+      let updatedImpactPool = market.impactPool;
+      if (compare(priceImpact, '0') < 0) {
+        // Negative impact increases the pool by the absolute value
+        updatedImpactPool = add(
+          market.impactPool,
+          multiply(cappedImpact, '-1'),
+        );
+      } else {
+        // Positive impact decreases the pool, but cannot go below 0
+        updatedImpactPool = subtract(market.impactPool, cappedImpact);
+      }
+
+      // Calculate final entry price
+      const entryPrice = await this.applyPriceImpact(
+        marketPrice,
+        cappedImpact,
+        order,
+      );
+
+      return { entryPrice, updatedImpactPool };
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw error;
@@ -909,112 +963,113 @@ export class TradeService {
     }
   }
 
+  /**
+   * @formula priceImpact = size usd * skew factor * liquidity factor
+   * where skew factor = (init skew / init total OI) - (updated skew / updated total OI)
+   * and liquidity factor = scalar * (size usd  / available OI)
+   */
   private async calculatePriceImpact(
     order: OrderRequest,
     market: Market,
   ): Promise<string> {
-    try {
-      // Calculate skew and OI
-      const initialSkew = subtract(
-        market.longOpenInterest,
-        market.shortOpenInterest,
-      );
-      const initialTotalOI = add(
-        market.longOpenInterest,
-        market.shortOpenInterest,
-      );
+    const initSkew =
+      Number(market.longOpenInterest) - Number(market.shortOpenInterest);
 
-      // Calculate updated state after trade
-      const updatedLongOI =
+    console.log('Init skew: ', initSkew);
+
+    const initOi =
+      Number(market.longOpenInterest) + Number(market.shortOpenInterest);
+
+    console.log('Init OI: ', initOi);
+
+    // If there's no initial open interest, only use the new order's impact
+    if (initOi === 0) {
+      const updatedSkew =
         order.side === OrderSide.LONG
-          ? add(market.longOpenInterest, order.size)
-          : market.longOpenInterest;
-      const updatedShortOI =
-        order.side === OrderSide.SHORT
-          ? add(market.shortOpenInterest, order.size)
-          : market.shortOpenInterest;
-      const updatedSkew = subtract(updatedLongOI, updatedShortOI);
-      const updatedTotalOI = add(updatedLongOI, updatedShortOI);
+          ? Number(order.size)
+          : -Number(order.size);
 
-      // Check if skew flips direction
-      const skewFlipped =
-        (isNegative(initialSkew) && isPositive(updatedSkew)) ||
-        (isPositive(initialSkew) && isNegative(updatedSkew));
+      console.log('Updated skew: ', updatedSkew);
 
-      let priceImpactUsd: string;
+      const updatedOi = Number(order.size);
 
-      if (skewFlipped) {
-        const equilibriumSize = abs(initialSkew);
-        const sizeToEquilibrium = min(order.size, equilibriumSize);
-        const remainingSize = subtract(order.size, sizeToEquilibrium);
-        const equilibriumTotalOI = add(initialTotalOI, sizeToEquilibrium);
+      console.log('Updated OI: ', updatedOi);
 
-        // Calculate positive impact up to equilibrium
-        const positiveImpact = this.calculateImpactComponent(
-          sizeToEquilibrium,
-          '0',
-          initialSkew,
-          initialTotalOI,
-          equilibriumTotalOI,
-          this.getAvailableOI(
-            market,
-            order.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
-          ),
-          LIQUIDITY_SCALAR,
-        );
+      // Just use the new skew ratio since there's no previous state to compare against
+      const skewFactor = divide(
+        abs(updatedSkew.toString()),
+        updatedOi.toString(),
+      );
 
-        // Calculate negative impact beyond equilibrium (if any)
-        const negativeImpact = isZero(remainingSize)
-          ? '0'
-          : this.calculateImpactComponent(
-              remainingSize,
-              updatedSkew,
-              '0',
-              equilibriumTotalOI,
-              updatedTotalOI,
-              this.getAvailableOI(market, order.side),
-              LIQUIDITY_SCALAR,
-            );
+      console.log('Skew factor: ', skewFactor);
 
-        priceImpactUsd = subtract(positiveImpact, negativeImpact);
+      const liquidityFactor = divide(order.size, market.availableLiquidity);
+
+      console.log('Liquidity factor: ', liquidityFactor);
+
+      return multiply(order.size, skewFactor, liquidityFactor);
+    }
+
+    // Short form of doing (x + k) - y || x - (y + k)
+    const updatedSkew =
+      order.side === OrderSide.LONG
+        ? initSkew + Number(order.size)
+        : initSkew - Number(order.size);
+
+    console.log('Updated skew: ', updatedSkew);
+
+    const updatedOi = initOi + Number(order.size);
+
+    console.log('Updated OI: ', updatedOi);
+
+    const skewFactor = subtract(
+      divide(initSkew.toString(), initOi.toString()),
+      divide(updatedSkew.toString(), updatedOi.toString()),
+    );
+
+    console.log('Skew factor: ', skewFactor);
+
+    if (parseFloat(skewFactor) > 1) {
+      throw new Error('Skew factor is greater than 1');
+    }
+
+    const liquidityFactor = divide(order.size, market.availableLiquidity);
+
+    console.log('Liquidity factor: ', liquidityFactor);
+
+    if (parseFloat(liquidityFactor) > 1) {
+      throw new Error('Liquidity factor is greater than 1');
+    }
+
+    return multiply(order.size, skewFactor, liquidityFactor);
+  }
+
+  /**
+   * @dev Returns the impacted price based on the price impact and order side
+   */
+  private async applyPriceImpact(
+    marketPrice: string,
+    priceImpact: string,
+    order: OrderRequest,
+  ): Promise<string> {
+    const impactPercentage = divide(priceImpact, order.size);
+
+    if (order.side === OrderSide.LONG) {
+      if (parseFloat(priceImpact) > 0) {
+        // if price impact is > 0 and it's long, decrease the price by impact percentage
+        return multiply(marketPrice, subtract('1', impactPercentage));
       } else {
-        priceImpactUsd = this.calculateImpactComponent(
-          order.size,
-          updatedSkew,
-          initialSkew,
-          initialTotalOI,
-          updatedTotalOI,
-          this.getAvailableOI(market, order.side),
-          LIQUIDITY_SCALAR,
-        );
+        // if price impact is < 0 and it's long, increase the price by impact percentage
+        return multiply(marketPrice, add('1', impactPercentage));
       }
-
-      // Handle impact pool
-      const finalImpactUsd =
-        order.side === OrderSide.LONG
-          ? multiply(priceImpactUsd, '-1')
-          : priceImpactUsd;
-
-      // Update impact pool and return capped impact
-      if (isPositive(finalImpactUsd)) {
-        const cappedImpact = min(finalImpactUsd, market.impactPool);
-        await this.marketService.updateMarket(market.id, {
-          impactPool: subtract(market.impactPool, cappedImpact),
-        });
-        return cappedImpact;
+    } else {
+      if (parseFloat(priceImpact) > 0) {
+        // if price impact is > 0 and it's short, increase the price by impact percentage
+        return multiply(marketPrice, add('1', impactPercentage));
+      } else {
+        // if price impact is < 0 and it's short, decrease the price by impact percentage
+        return multiply(marketPrice, subtract('1', impactPercentage));
       }
-
-      await this.marketService.updateMarket(market.id, {
-        impactPool: add(market.impactPool, abs(finalImpactUsd)),
-      });
-      return finalImpactUsd;
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException(
-        'Failed to calculate price impact',
-      );
     }
   }
 
@@ -1040,39 +1095,6 @@ export class TradeService {
         'Failed to calculate required margin',
       );
     }
-  }
-
-  private calculateImpactComponent(
-    sizeDeltaUsd: string,
-    updatedSkew: string,
-    initialSkew: string,
-    initialTotalOI: string,
-    updatedTotalOI: string,
-    availableOI: string,
-    priceImpactScalar: string,
-  ): string {
-    if (isZero(updatedTotalOI)) return '0';
-
-    // Calculate skew factor
-    const skewFactor = isZero(initialTotalOI)
-      ? divide(abs(updatedSkew), updatedTotalOI)
-      : subtract(
-          divide(abs(initialSkew), initialTotalOI),
-          divide(abs(updatedSkew), updatedTotalOI),
-        );
-
-    let priceImpactUsd = multiply(sizeDeltaUsd, skewFactor);
-
-    // Apply liquidity factor (minimum 1%)
-    let liquidityFactor = divide(sizeDeltaUsd, availableOI);
-    if (lt(liquidityFactor, '0.01')) {
-      liquidityFactor = '0.01';
-    }
-
-    return multiply(
-      multiply(priceImpactUsd, liquidityFactor),
-      priceImpactScalar,
-    );
   }
 
   private calculatePnl(
@@ -1102,21 +1124,18 @@ export class TradeService {
     }
   }
 
-  private calculateSlippage(size: string): string {
-    try {
-      if (!size) {
-        throw new BadRequestException(
-          'Size is required for slippage calculation',
-        );
-      }
-
-      return min('0.01', divide(size, '1000000'));
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate slippage');
+  private calculateSlippage(
+    size: string,
+    priceImpact: string,
+    positivelyImpacted: boolean,
+  ): string {
+    if (positivelyImpacted) {
+      // If impact was positively beneficial, the position did not experience any slippage
+      return '0';
     }
+
+    // If negatively impacted, the slippage is the price impact percentage (price impact / size)
+    return divide(priceImpact, size);
   }
 
   private calculateFee(size: string, price: string): string {
@@ -1143,7 +1162,11 @@ export class TradeService {
         throw new BadRequestException('Invalid trade data');
       }
 
-      await this.databaseService.insert('trades', trade);
+      const insertedTrade = await this.databaseService.insert('trades', trade);
+
+      // Add volume to market stats -> multiply by 2 for entry and exit
+      const volume = multiply(trade.size, '2');
+      await this.statsService.addVolume(trade.marketId, volume);
 
       await this.invalidatePositionCache(trade.positionId, trade.userId);
     } catch (error) {

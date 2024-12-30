@@ -100,7 +100,7 @@ export class LimitOrderService {
     );
 
     // Emit position update event
-    this.eventsService.emitPositionsUpdate();
+    this.eventsService.emitPositionsUpdate(orderRequest.userId);
 
     return savedOrder;
   }
@@ -129,7 +129,7 @@ export class LimitOrderService {
     );
 
     // Emit position update event
-    this.eventsService.emitPositionsUpdate();
+    this.eventsService.emitPositionsUpdate(userId);
   }
 
   private async checkAndExecuteLimitOrders(): Promise<void> {
@@ -226,7 +226,7 @@ export class LimitOrderService {
       );
 
       // Emit position update event
-      this.eventsService.emitPositionsUpdate();
+      this.eventsService.emitPositionsUpdate(orderRequest.userId);
 
       this.logger.log(`Limit order ${order.id} executed successfully`);
     } catch (error) {
@@ -238,7 +238,7 @@ export class LimitOrderService {
   async getUserLimitOrders(userId: string): Promise<LimitOrder[]> {
     return this.databaseService.select<LimitOrder>('limit_orders', {
       eq: { userId },
-      order: { column: 'created_at', ascending: false },
+      order: { column: 'createdAt', ascending: false },
     });
   }
 

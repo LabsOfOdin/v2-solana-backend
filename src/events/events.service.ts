@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Subject } from 'rxjs';
+import { filter } from 'rxjs/operators';
 import { TokenType } from 'src/types/token.types';
 
 interface BorrowingFeeEvent {
@@ -11,16 +12,26 @@ interface BorrowingFeeEvent {
   token: TokenType;
 }
 
+interface PositionUpdate {
+  userId: string;
+  timestamp: string;
+}
+
 @Injectable()
 export class EventsService {
-  private positionsSubject = new Subject<void>();
+  private positionsSubject = new Subject<PositionUpdate>();
 
-  getPositionsEventObservable() {
-    return this.positionsSubject.asObservable();
+  getPositionsEventObservable(userId: string) {
+    return this.positionsSubject
+      .asObservable()
+      .pipe(filter((update) => update.userId === userId));
   }
 
-  emitPositionsUpdate() {
-    this.positionsSubject.next();
+  emitPositionsUpdate(userId: string) {
+    this.positionsSubject.next({
+      userId,
+      timestamp: new Date().toISOString(),
+    });
   }
 
   emitBorrowingFeeCharged(event: BorrowingFeeEvent): void {

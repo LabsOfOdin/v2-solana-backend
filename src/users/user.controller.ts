@@ -12,7 +12,7 @@ export class UserController {
     try {
       const existingUser = await this.userService.getUserByPublicKey(publicKey);
       return existingUser;
-    } catch {
+    } catch (error) {
       // If user doesn't exist, create a new one
       return this.userService.createUser(publicKey);
     }

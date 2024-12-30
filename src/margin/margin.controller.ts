@@ -10,7 +10,7 @@ import {
 import { MarginService } from './margin.service';
 import { TokenType } from 'src/types/token.types';
 import { MarginBalance } from 'src/entities/margin-balance.entity';
-import { UserService } from '../user/user.service';
+import { UserService } from '../users/user.service';
 
 @Controller('margin')
 export class MarginController {

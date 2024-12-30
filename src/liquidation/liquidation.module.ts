@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { LiquidationService } from './liquidation.service';
-import { UserModule } from '../user/user.module';
+import { UserModule } from '../users/user.module';
 import { PriceModule } from '../price/price.module';
 import { EventsModule } from '../events/events.module';
 import { MarginModule } from '../margin/margin.module';

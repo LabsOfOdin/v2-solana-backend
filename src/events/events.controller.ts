@@ -1,4 +1,4 @@
-import { Controller, Sse } from '@nestjs/common';
+import { Controller, Sse, Query } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { EventsService } from './events.service';
@@ -8,12 +8,15 @@ export class EventsController {
   constructor(private readonly eventsService: EventsService) {}
 
   @Sse('positions')
-  positions(): Observable<MessageEvent> {
-    return this.eventsService.getPositionsEventObservable().pipe(
+  positions(@Query('userId') userId: string): Observable<MessageEvent> {
+    return this.eventsService.getPositionsEventObservable(userId).pipe(
       map(
-        () =>
+        (update) =>
           ({
-            data: { timestamp: new Date().toISOString() },
+            data: {
+              userId: update.userId,
+              timestamp: update.timestamp,
+            },
           }) as MessageEvent,
       ),
     );

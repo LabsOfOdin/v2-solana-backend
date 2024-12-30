@@ -13,9 +13,9 @@ import {
   CreateMarketDto,
   UpdateMarketDto,
   MarketInfo,
-  MarketStats,
 } from '../types/market.types';
 import { PriceService } from '../price/price.service';
+import { StatsService } from '../stats/stats.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { add } from 'src/lib/math';
 
@@ -26,6 +26,7 @@ export class MarketService {
     @Inject(forwardRef(() => PriceService))
     private readonly priceService: PriceService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
+    private readonly statsService: StatsService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -60,7 +61,11 @@ export class MarketService {
       maxFundingVelocity: dto.maxFundingVelocity || '0.01',
       borrowingRate: dto.borrowingRate || '0.0003',
       lastUpdatedTimestamp: Date.now(),
+      availableLiquidity: dto.availableLiquidity || '0',
     });
+
+    // Initialize market stats
+    await this.statsService.addVolume(market.id, '0');
 
     await this.invalidateMarketCache();
     return market;
@@ -88,6 +93,10 @@ export class MarketService {
 
     if (dto.maxFundingVelocity) {
       updateData.maxFundingVelocity = dto.maxFundingVelocity;
+    }
+
+    if (dto.availableLiquidity) {
+      updateData.availableLiquidity = dto.availableLiquidity;
     }
 
     const [updatedMarket] = await this.databaseService.update<Market>(
@@ -155,14 +164,34 @@ export class MarketService {
     });
 
     // Transform markets into MarketInfo array
-    const marketsInfo = await Promise.all(
+    const marketsInfo: MarketInfo[] = await Promise.all(
       markets.map(async (market) => {
         const lastPrice = await this.priceService.getCurrentPrice(market.id);
+
+        let volume24h = '0';
+        try {
+          const stats = await this.statsService.getMarketStats(market.id);
+          volume24h = stats.volume24h;
+        } catch (error) {
+          // If stats don't exist yet, default to 0
+        }
+
         return {
-          ...market,
+          id: market.id,
+          symbol: market.symbol,
+          tokenAddress: market.tokenAddress,
+          poolAddress: market.poolAddress,
+          maxLeverage: market.maxLeverage,
+          maintainanceMargin: market.maintainanceMargin,
+          borrowingRate: market.borrowingRate,
+          fundingRate: market.fundingRate,
+          fundingRateVelocity: market.fundingRateVelocity,
+          lastUpdatedTimestamp: market.lastUpdatedTimestamp,
+          longOpenInterest: market.longOpenInterest,
+          shortOpenInterest: market.shortOpenInterest,
+          availableLiquidity: market.availableLiquidity,
+          volume24h,
           lastPrice,
-          volume24h: '0',
-          openInterest: '0',
         };
       }),
     );
@@ -173,17 +202,36 @@ export class MarketService {
 
   async getMarketInfo(marketId: string): Promise<MarketInfo> {
     const market = await this.getMarketById(marketId);
-    const lastPrice = await this.priceService.getCurrentPrice(marketId);
 
-    return {
-      ...market,
-      lastPrice,
-      volume24h: '0',
-      openInterest: '0',
+    const lastPrice = await this.priceService.getCurrentPrice(market.id);
+
+    let volume24h = '0';
+    try {
+      const stats = await this.statsService.getMarketStats(market.id);
+      volume24h = stats.volume24h;
+    } catch (error) {
+      // If stats don't exist yet, default to 0
+    }
+
+    const marketInfo: MarketInfo = {
+      id: market.id,
+      symbol: market.symbol,
+      tokenAddress: market.tokenAddress,
+      poolAddress: market.poolAddress,
+      maxLeverage: market.maxLeverage,
+      maintainanceMargin: market.maintainanceMargin,
       borrowingRate: market.borrowingRate,
+      fundingRate: market.fundingRate,
+      fundingRateVelocity: market.fundingRateVelocity,
+      lastUpdatedTimestamp: market.lastUpdatedTimestamp,
       longOpenInterest: market.longOpenInterest,
       shortOpenInterest: market.shortOpenInterest,
+      availableLiquidity: market.availableLiquidity,
+      volume24h,
+      lastPrice,
     };
+
+    return marketInfo;
   }
 
   async updateFundingRate(marketId: string): Promise<void> {
@@ -222,74 +270,6 @@ export class MarketService {
       estimatedRate,
       unrecordedFunding,
     };
-  }
-
-  async getFundingHistory(
-    marketId: string,
-    startTime?: string,
-    endTime?: string,
-  ): Promise<{
-    history: {
-      timestamp: Date;
-      rate: string;
-      price: string;
-    }[];
-  }> {
-    const cacheKey = `funding:history:${marketId}:${startTime}:${endTime}`;
-    const cachedHistory = await this.cacheManager.get<{ history: any[] }>(
-      cacheKey,
-    );
-
-    if (cachedHistory) {
-      return cachedHistory;
-    }
-
-    await this.getMarketById(marketId); // Verify market exists
-
-    const start = startTime
-      ? new Date(startTime)
-      : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const end = endTime ? new Date(endTime) : new Date();
-
-    // Generate history (mock data for now)
-    const history = [];
-    let currentTime = new Date(start);
-
-    while (currentTime <= end) {
-      const price = await this.priceService.getCurrentPrice(marketId);
-      history.push({
-        timestamp: new Date(currentTime),
-        rate: '0.0001',
-        price,
-      });
-
-      currentTime = new Date(currentTime.getTime() + 8 * 60 * 60 * 1000);
-    }
-
-    const result = { history };
-    await this.cacheManager.set(cacheKey, result, 5 * 60 * 1000); // 5 minutes TTL
-    return result;
-  }
-
-  async getMarketStats(marketId: string): Promise<MarketStats> {
-    const market = await this.getMarketById(marketId);
-    const currentPrice = await this.priceService.getCurrentPrice(marketId);
-
-    const stats = {
-      markPrice: currentPrice,
-      priceChange24h: '0',
-      volume24h: '0',
-      openInterest: '0',
-      fundingRate: market.fundingRate,
-      maxLeverage: market.maxLeverage,
-      liquidationFee: '0.025',
-      borrowingRate: market.borrowingRate,
-      longOpenInterest: market.longOpenInterest,
-      shortOpenInterest: market.shortOpenInterest,
-    };
-
-    await this.cacheManager.set(`market:stats:${marketId}`, stats, 60 * 1000); // 1 minute TTL
-    return stats;
   }
 
   private async calculateFundingRate(market: Market): Promise<string> {

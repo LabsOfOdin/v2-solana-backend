@@ -28,7 +28,6 @@ export const getCacheKey = {
   userTrades: (userId: string) => `${CACHE_KEY.USER_TRADES}:${userId}`,
   market: (marketId: string) => `${CACHE_KEY.MARKET}:${marketId}`,
   marketBySymbol: (symbol: string) => `${CACHE_KEY.MARKET}:symbol:${symbol}`,
-  marketStats: (marketId: string) => `${CACHE_KEY.MARKET_STATS}:${marketId}`,
   fundingHistory: (marketId: string, startTime?: string, endTime?: string) =>
     `${CACHE_KEY.FUNDING_HISTORY}:${marketId}:${startTime}:${endTime}`,
   borrowingHistory: (

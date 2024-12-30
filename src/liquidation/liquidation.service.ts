@@ -114,37 +114,29 @@ export class LiquidationService {
       eq: { status: PositionStatus.OPEN },
     });
 
-    for (const position of positions) {
-      try {
-        const currentPrice = await this.priceService.getCurrentPrice(
-          position.marketId,
-        );
+    await Promise.all(
+      positions.map(async (position) => {
+        try {
+          const currentPrice = await this.priceService.getCurrentPrice(
+            position.marketId,
+          );
 
-        if (await this.shouldLiquidate(position, currentPrice)) {
-          await this.liquidatePosition(position, currentPrice);
-          this.logger.warn(
-            `Liquidated position ${position.id} at price ${currentPrice}`,
+          if (await this.shouldLiquidate(position, currentPrice)) {
+            await this.liquidatePosition(position, currentPrice);
+            this.logger.warn(
+              `Liquidated position ${position.id} at price ${currentPrice}`,
+            );
+          }
+        } catch (error) {
+          this.logger.error(
+            `Error processing position ${position.id} for liquidation:`,
+            error,
           );
         }
-      } catch (error) {
-        this.logger.error(
-          `Error processing position ${position.id} for liquidation:`,
-          error,
-        );
-      }
-    }
+      }),
+    );
   }
 
-  /**
-   * @audit Seems fishy. Why is there pnl calculation here?
-   * Should just nuke the margin from their account.
-   * We should also probably have something in the DB so we can track
-   * the funds we've earned from:
-   * - liquidation fees
-   * - borrowing fees
-   * - funding fees
-   * - position fees
-   */
   private async liquidatePosition(
     position: Position,
     currentPrice: string,
@@ -161,6 +153,8 @@ export class LiquidationService {
         { id: position.id },
       );
 
+      this.eventsService.emitPositionsUpdate(position.userId);
+
       this.logger.log(
         `Position ${position.id} liquidated at price ${currentPrice}`,
       );
@@ -176,95 +170,98 @@ export class LiquidationService {
     });
     const now = new Date();
 
-    for (const position of positions) {
-      try {
-        if (!position.lastBorrowingFeeUpdate) {
-          position.lastBorrowingFeeUpdate = position.createdAt;
-        }
-
-        const hoursSinceLastUpdate =
-          (now.getTime() - position.lastBorrowingFeeUpdate.getTime()) /
-          (1000 * 60 * 60);
-
-        if (hoursSinceLastUpdate >= 1) {
-          const [market] = await this.databaseService.select<Market>(
-            'markets',
-            {
-              eq: { id: position.marketId },
-              limit: 1,
-            },
-          );
-
-          if (!market) {
-            throw new Error('Market not found');
+    await Promise.all(
+      positions.map(async (position) => {
+        try {
+          if (!position.lastBorrowingFeeUpdate) {
+            position.lastBorrowingFeeUpdate = position.createdAt;
           }
 
-          const currentPrice = await this.priceService.getCurrentPrice(
-            position.marketId,
+          const hoursSinceLastUpdate =
+            (now.getTime() -
+              new Date(position.lastBorrowingFeeUpdate).getTime()) /
+            (1000 * 60 * 60);
+
+          if (hoursSinceLastUpdate >= 1) {
+            const [market] = await this.databaseService.select<Market>(
+              'markets',
+              {
+                eq: { id: position.marketId },
+                limit: 1,
+              },
+            );
+
+            if (!market) {
+              throw new Error('Market not found');
+            }
+
+            const currentPrice = await this.priceService.getCurrentPrice(
+              position.marketId,
+            );
+            const positionValue = multiply(position.size, currentPrice);
+
+            // Calculate borrowing fee for the elapsed hours
+            const hoursToCharge = Math.floor(hoursSinceLastUpdate);
+            const borrowingFeeUsd = multiply(
+              positionValue,
+              multiply(market.borrowingRate, hoursToCharge.toString()),
+            );
+
+            // Get token price for conversion
+            const tokenPrice =
+              position.token === TokenType.SOL
+                ? await this.priceService.getSolPrice()
+                : await this.priceService.getUsdcPrice();
+
+            // Convert fee to token amount
+            const feeInToken = divide(borrowingFeeUsd, tokenPrice);
+
+            // Deduct fee from user's margin balance
+            await this.marginService.deductMargin(
+              position.userId,
+              position.token,
+              feeInToken,
+            );
+
+            // Add fee to market's tracking
+            /**
+             * @audit Need to distinguish between trading fees in SOL and USDC
+             */
+            await this.marketService.addTradingFees(market.id, feeInToken);
+
+            // Update position's accumulated borrowing fee and last update time
+            await this.databaseService.update<Position>(
+              'positions',
+              {
+                accumulatedBorrowingFee: add(
+                  position.accumulatedBorrowingFee,
+                  feeInToken,
+                ),
+                lastBorrowingFeeUpdate: new Date(
+                  position.lastBorrowingFeeUpdate.getTime() +
+                    hoursToCharge * 60 * 60 * 1000,
+                ),
+              },
+              { id: position.id },
+            );
+
+            // Emit fee charged event
+            this.eventsService.emitBorrowingFeeCharged({
+              userId: position.userId,
+              positionId: position.id,
+              marketId: market.id,
+              feeUsd: feeInToken,
+              feeToken: feeInToken,
+              token: position.token,
+            });
+          }
+        } catch (error) {
+          this.logger.error(
+            `Error updating borrowing fees for position ${position.id}:`,
+            error,
           );
-          const positionValue = multiply(position.size, currentPrice);
-
-          // Calculate borrowing fee for the elapsed hours
-          const hoursToCharge = Math.floor(hoursSinceLastUpdate);
-          const borrowingFeeUsd = multiply(
-            positionValue,
-            multiply(market.borrowingRate, hoursToCharge.toString()),
-          );
-
-          // Get token price for conversion
-          const tokenPrice =
-            position.token === TokenType.SOL
-              ? await this.priceService.getSolPrice()
-              : await this.priceService.getUsdcPrice();
-
-          // Convert fee to token amount
-          const feeInToken = divide(borrowingFeeUsd, tokenPrice);
-
-          // Deduct fee from user's margin balance
-          await this.marginService.deductMargin(
-            position.userId,
-            position.token,
-            feeInToken,
-          );
-
-          // Add fee to market's tracking
-          /**
-           * @audit Need to distinguish between trading fees in SOL and USDC
-           */
-          await this.marketService.addTradingFees(market.id, feeInToken);
-
-          // Update position's accumulated borrowing fee and last update time
-          await this.databaseService.update<Position>(
-            'positions',
-            {
-              accumulatedBorrowingFee: add(
-                position.accumulatedBorrowingFee,
-                feeInToken,
-              ),
-              lastBorrowingFeeUpdate: new Date(
-                position.lastBorrowingFeeUpdate.getTime() +
-                  hoursToCharge * 60 * 60 * 1000,
-              ),
-            },
-            { id: position.id },
-          );
-
-          // Emit fee charged event
-          this.eventsService.emitBorrowingFeeCharged({
-            userId: position.userId,
-            positionId: position.id,
-            marketId: market.id,
-            feeUsd: feeInToken,
-            feeToken: feeInToken,
-            token: position.token,
-          });
         }
-      } catch (error) {
-        this.logger.error(
-          `Error updating borrowing fees for position ${position.id}:`,
-          error,
-        );
-      }
-    }
+      }),
+    );
   }
 }
