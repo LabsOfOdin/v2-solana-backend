@@ -213,12 +213,18 @@ export class TradeService {
 
       // 3. Validate leverage and liquidity
       const leverage = parseFloat(orderRequest.leverage);
+
       if (leverage === 0 || leverage > parseFloat(market.maxLeverage)) {
         throw new BadRequestException('Invalid Leverage');
       }
+
       const currentOpenInterest =
-        market.longOpenInterest + market.shortOpenInterest;
-      if (orderRequest.size + currentOpenInterest > market.availableLiquidity) {
+        Number(market.longOpenInterest) + Number(market.shortOpenInterest);
+
+      if (
+        Number(orderRequest.size) + currentOpenInterest >
+        Number(market.availableLiquidity)
+      ) {
         throw new BadRequestException('Insufficient liquidity');
       }
 
