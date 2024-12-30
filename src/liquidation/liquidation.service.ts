@@ -8,7 +8,8 @@ import { TokenType } from 'src/types/token.types';
 import { MarginService } from '../margin/margin.service';
 import { MarketService } from '../market/market.service';
 import { EventsService } from '../events/events.service';
-import { add, compare, divide, multiply, subtract } from 'src/lib/math';
+import { add, divide, multiply, subtract } from 'src/lib/math';
+import { calculatePnlUSD } from 'src/lib/calculatePnlUsd';
 
 @Injectable()
 export class LiquidationService {
@@ -55,57 +56,76 @@ export class LiquidationService {
     return this.calculateLiquidationPrice(position);
   }
 
+  private async isLiquidatable(
+    position: Position,
+    currentPrice: string,
+  ): Promise<boolean> {
+    const solPrice = await this.priceService.getSolPrice();
+
+    const pnl = calculatePnlUSD(position, currentPrice);
+
+    const collateralValue = add(
+      multiply(position.lockedMarginSOL, solPrice),
+      position.lockedMarginUSDC,
+    );
+
+    const minCollateralValue = multiply(
+      collateralValue,
+      this.maintenanceMarginRate,
+    );
+
+    if (parseFloat(pnl) < 0) {
+      // If the total losses exceed the collateral value, liquidate
+      if (Math.abs(parseFloat(pnl)) > parseFloat(minCollateralValue)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   private async calculateLiquidationPrice(position: Position): Promise<string> {
-    // Calculate total fees
+    const solPrice = await this.priceService.getSolPrice();
+
+    // Calculate total collateral value in USD
+    const collateralValue = add(
+      multiply(position.lockedMarginSOL, solPrice),
+      position.lockedMarginUSDC,
+    );
+
+    // Account for accumulated fees
     const totalFees = add(
       position.accumulatedFunding || '0',
       position.accumulatedBorrowingFee || '0',
     );
 
-    const solPrice = await this.priceService.getSolPrice();
-
-    // Calculate the USD value of the position's margin
-    const marginUSD = add(
-      multiply(position.lockedMarginSOL, solPrice),
-      position.lockedMarginUSDC,
-    );
-
-    // Calculate effective margin (initial margin - fees)
-    const effectiveMargin = subtract(marginUSD, totalFees);
-
-    // Position value is just size since it's already in USD
-    const positionValue = position.size;
-
-    // Calculate required margin with maintenance requirement
-    const requiredMargin = multiply(positionValue, this.maintenanceMarginRate);
-
-    // Calculate max loss percentage (effective margin - required margin) / position value
-    const maxLossPercentage = divide(
-      subtract(effectiveMargin, requiredMargin),
-      positionValue,
-    );
+    // For liquidation: abs(pnl) = collateralValue
+    // pnl = (currentPrice - entryPrice) * size for longs
+    // pnl = (entryPrice - currentPrice) * size for shorts
 
     if (position.side === OrderSide.LONG) {
-      // For longs: liquidation_price = entry_price * (1 - maxLossPercentage)
-      const multiplier = subtract('1', maxLossPercentage);
-      return multiply(position.entryPrice, multiplier);
+      // (currentPrice - entryPrice) * size - fees = -collateralValue
+      // currentPrice * size = -collateralValue + fees + entryPrice * size
+      return divide(
+        subtract(
+          subtract(
+            multiply(position.entryPrice, position.size),
+            collateralValue,
+          ),
+          totalFees,
+        ),
+        position.size,
+      );
     } else {
-      // For shorts: liquidation_price = entry_price * (1 + maxLossPercentage)
-      const multiplier = add('1', maxLossPercentage);
-      return multiply(position.entryPrice, multiplier);
-    }
-  }
-
-  private async shouldLiquidate(
-    position: Position,
-    currentPrice: string,
-  ): Promise<boolean> {
-    const liquidationPrice = await this.calculateLiquidationPrice(position);
-
-    if (position.side === OrderSide.LONG) {
-      return compare(currentPrice, liquidationPrice) <= 0;
-    } else {
-      return compare(currentPrice, liquidationPrice) >= 0;
+      // (entryPrice - currentPrice) * size - fees = -collateralValue
+      // currentPrice * size = entryPrice * size + collateralValue + fees
+      return divide(
+        add(
+          add(multiply(position.entryPrice, position.size), collateralValue),
+          totalFees,
+        ),
+        position.size,
+      );
     }
   }
 
@@ -121,7 +141,12 @@ export class LiquidationService {
             position.marketId,
           );
 
-          if (await this.shouldLiquidate(position, currentPrice)) {
+          const isLiquidatable = await this.isLiquidatable(
+            position,
+            currentPrice,
+          );
+
+          if (isLiquidatable) {
             await this.liquidatePosition(position, currentPrice);
             this.logger.warn(
               `Liquidated position ${position.id} at price ${currentPrice}`,
