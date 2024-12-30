@@ -8,7 +8,7 @@ import { MarginLock } from '../entities/margin-lock.entity';
 import { User } from '../entities/user.entity';
 import { TokenType } from 'src/types/token.types';
 import { InvalidTokenError, InsufficientMarginError } from '../common/errors';
-import { UserService } from '../user/user.service';
+import { UserService } from '../users/user.service';
 import { MarginBalance } from 'src/entities/margin-balance.entity';
 import { SolanaService } from '../solana/solana.service';
 import { add, compare, subtract } from 'src/lib/math';

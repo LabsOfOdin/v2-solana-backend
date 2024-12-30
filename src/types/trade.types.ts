@@ -30,6 +30,7 @@ export interface OrderRequest {
   stopLossPrice?: string;
   takeProfitPrice?: string;
   trailingStopDistance?: string;
+  maxSlippage?: string;
 }
 
 export interface LimitOrderRequest extends OrderRequest {
@@ -62,5 +63,4 @@ export interface Trade {
   realizedPnl?: string;
   fee: string;
   createdAt: Date;
-  isPartialClose?: boolean;
 }

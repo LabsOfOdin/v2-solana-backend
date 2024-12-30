@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { LimitOrderService } from './limit-order.service';
 import { TradeModule } from '../trade/trade.module';
-import { UserModule } from '../user/user.module';
+import { UserModule } from '../users/user.module';
 import { PriceModule } from '../price/price.module';
 import { MarginModule } from '../margin/margin.module';
 import { LimitOrderController } from './limit-order.controller';

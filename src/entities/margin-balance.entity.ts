@@ -1,5 +1,5 @@
 import { TokenType } from 'src/types/token.types';
-import { User } from 'src/user/types/user.types';
+import { User } from 'src/users/types/user.types';
 
 export interface MarginBalance {
   id: string;
