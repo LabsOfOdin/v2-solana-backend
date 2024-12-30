@@ -1,4 +1,4 @@
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Post, Body, ConflictException } from '@nestjs/common';
 import { UserService } from './user.service';
 import { User } from '../entities/user.entity';
 
@@ -8,13 +8,24 @@ export class UserController {
 
   @Post()
   async createUser(@Body('publicKey') publicKey: string): Promise<User> {
-    // First try to find if user exists
     try {
+      // First try to find if user exists
       const existingUser = await this.userService.getUserByPublicKey(publicKey);
       return existingUser;
     } catch (error) {
-      // If user doesn't exist, create a new one
-      return this.userService.createUser(publicKey);
+      try {
+        // If user doesn't exist, create a new one
+        return await this.userService.createUser(publicKey);
+      } catch (error) {
+        // Handle database unique constraint violation
+        if (error.code === '23505') {
+          // PostgreSQL unique violation code
+          // If we hit a duplicate key error, it means another concurrent request
+          // created the user. Try to fetch it again.
+          return await this.userService.getUserByPublicKey(publicKey);
+        }
+        throw error;
+      }
     }
   }
 }
