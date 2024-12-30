@@ -34,6 +34,7 @@ import {
 } from 'src/lib/math';
 import { DatabaseService } from 'src/database/database.service';
 import { StatsService } from '../stats/stats.service';
+import { calculatePnlUSD } from 'src/lib/calculatePnlUsd';
 
 @Injectable()
 export class TradeService {
@@ -275,6 +276,14 @@ export class TradeService {
       // 2. Update market's impact pool
       await this.marketService.updateMarket(market.id, {
         impactPool: updatedImpactPool,
+        longOpenInterest:
+          orderRequest.side === OrderSide.LONG
+            ? add(market.longOpenInterest, orderRequest.size)
+            : market.longOpenInterest,
+        shortOpenInterest:
+          orderRequest.side === OrderSide.SHORT
+            ? add(market.shortOpenInterest, orderRequest.size)
+            : market.shortOpenInterest,
       });
 
       // 3. Create position
@@ -363,23 +372,25 @@ export class TradeService {
       const currentPrice = await this.priceService.getCurrentPrice(
         position.marketId,
       );
+
       const remainingSize = subtract(position.size, sizeDelta);
-      const realizedPnlUSD = this.calculatePnl(
-        position.side,
-        sizeDelta,
-        position.entryPrice,
-        currentPrice,
-      );
+
+      const realizedPnlUSD = calculatePnlUSD(position, currentPrice);
+
       const solPrice = await this.priceService.getSolPrice();
+
       const closeProportion = divide(sizeDelta, position.size);
+
       const solMarginToRelease = multiply(
         position.lockedMarginSOL,
         closeProportion,
       );
+
       const usdcMarginToRelease = multiply(
         position.lockedMarginUSDC,
         closeProportion,
       );
+
       const totalLockedUSD = add(
         multiply(solMarginToRelease, solPrice),
         usdcMarginToRelease,
@@ -409,6 +420,12 @@ export class TradeService {
         fee: this.calculateFee(sizeDelta, currentPrice),
         createdAt: new Date(),
       };
+
+      // 6. Get the market
+      const market = await this.marketService.getMarketById(position.marketId);
+      if (!market) {
+        throw new NotFoundException(`Market ${position.marketId} not found`);
+      }
 
       // PART 3: Database Updates (all or nothing)
       // -------------------------------------
@@ -503,6 +520,17 @@ export class TradeService {
             },
         { id: position.id },
       );
+
+      await this.marketService.updateMarket(market.id, {
+        longOpenInterest:
+          position.side === OrderSide.LONG
+            ? subtract(market.longOpenInterest, sizeDelta)
+            : market.longOpenInterest,
+        shortOpenInterest:
+          position.side === OrderSide.SHORT
+            ? subtract(market.shortOpenInterest, sizeDelta)
+            : market.shortOpenInterest,
+      });
 
       // 3. Record the trade
       await this.recordTrade(tradeRecord);
@@ -906,11 +934,7 @@ export class TradeService {
       // Calculate price impact
       const priceImpact = await this.calculatePriceImpact(order, market);
 
-      console.log('Price impact: ', priceImpact);
-
       const positivelyImpacted = compare(priceImpact, '0') > 0;
-
-      console.log('Positively impacted: ', positivelyImpacted);
 
       // Calculate slippage
       const slippagePercentage = this.calculateSlippage(
@@ -918,10 +942,6 @@ export class TradeService {
         priceImpact,
         positivelyImpacted,
       );
-
-      console.log('Slippage percentage: ', slippagePercentage);
-
-      console.log('Max slippage: ', order.maxSlippage);
 
       if (compare(slippagePercentage, order.maxSlippage) > 0) {
         throw new BadRequestException('Slippage exceeds max slippage');
@@ -975,12 +995,8 @@ export class TradeService {
     const initSkew =
       Number(market.longOpenInterest) - Number(market.shortOpenInterest);
 
-    console.log('Init skew: ', initSkew);
-
     const initOi =
       Number(market.longOpenInterest) + Number(market.shortOpenInterest);
-
-    console.log('Init OI: ', initOi);
 
     // If there's no initial open interest, only use the new order's impact
     if (initOi === 0) {
@@ -989,11 +1005,7 @@ export class TradeService {
           ? Number(order.size)
           : -Number(order.size);
 
-      console.log('Updated skew: ', updatedSkew);
-
       const updatedOi = Number(order.size);
-
-      console.log('Updated OI: ', updatedOi);
 
       // Just use the new skew ratio since there's no previous state to compare against
       const skewFactor = divide(
@@ -1001,11 +1013,7 @@ export class TradeService {
         updatedOi.toString(),
       );
 
-      console.log('Skew factor: ', skewFactor);
-
       const liquidityFactor = divide(order.size, market.availableLiquidity);
-
-      console.log('Liquidity factor: ', liquidityFactor);
 
       return multiply(order.size, skewFactor, liquidityFactor);
     }
@@ -1016,26 +1024,18 @@ export class TradeService {
         ? initSkew + Number(order.size)
         : initSkew - Number(order.size);
 
-    console.log('Updated skew: ', updatedSkew);
-
     const updatedOi = initOi + Number(order.size);
-
-    console.log('Updated OI: ', updatedOi);
 
     const skewFactor = subtract(
       divide(initSkew.toString(), initOi.toString()),
       divide(updatedSkew.toString(), updatedOi.toString()),
     );
 
-    console.log('Skew factor: ', skewFactor);
-
     if (parseFloat(skewFactor) > 1) {
       throw new Error('Skew factor is greater than 1');
     }
 
     const liquidityFactor = divide(order.size, market.availableLiquidity);
-
-    console.log('Liquidity factor: ', liquidityFactor);
 
     if (parseFloat(liquidityFactor) > 1) {
       throw new Error('Liquidity factor is greater than 1');
@@ -1094,33 +1094,6 @@ export class TradeService {
       throw new InternalServerErrorException(
         'Failed to calculate required margin',
       );
-    }
-  }
-
-  private calculatePnl(
-    side: OrderSide,
-    size: string,
-    entryPrice: string,
-    currentPrice: string,
-  ): string {
-    try {
-      if (!side || !size || !entryPrice || !currentPrice) {
-        throw new BadRequestException(
-          'Missing required parameters for PnL calculation',
-        );
-      }
-
-      const priceDiff =
-        side === OrderSide.LONG
-          ? subtract(currentPrice, entryPrice)
-          : subtract(entryPrice, currentPrice);
-
-      return multiply(size, priceDiff);
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate PnL');
     }
   }
 

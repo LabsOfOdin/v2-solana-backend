@@ -32,6 +32,10 @@ export class MarginService {
     private readonly solanaService: SolanaService,
   ) {}
 
+  /**
+   * @audit We can probably make this automatically detect margin deposits.
+   * But will need some security features --> reduce by transfers out etc.
+   */
   async depositMargin(
     user: User,
     amount: string,
