@@ -16,8 +16,10 @@ export interface Market {
   longOpenInterest: string;
   shortOpenInterest: string;
   impactPool: string;
-  cumulativeFees: string;
-  unclaimedFees: string;
+  cumulativeFeesSol: string;
+  cumulativeFeesUsdc: string;
+  unclaimedFeesSol: string;
+  unclaimedFeesUsdc: string;
   maxFundingRate: string;
   maxFundingVelocity: string;
   status: MarketStatus;

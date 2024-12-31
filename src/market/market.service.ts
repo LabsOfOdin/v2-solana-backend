@@ -17,7 +17,9 @@ import {
 import { PriceService } from '../price/price.service';
 import { StatsService } from '../stats/stats.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { add } from 'src/lib/math';
+import { add, clamp, divide, multiply, subtract } from 'src/lib/math';
+import { TokenType } from 'src/types/token.types';
+import { SECONDS_IN_DAY } from 'src/common/config';
 
 @Injectable()
 export class MarketService {
@@ -34,7 +36,22 @@ export class MarketService {
     const markets = await this.databaseService.select<Market>('markets', {});
 
     await Promise.all(
-      markets.map((market) => this.calculateFundingRate(market)),
+      markets.map(async (market) => {
+        // Calculate the new rate and velocity
+        const currentFundingRate = await this.getCurrentFundingRate(market);
+
+        const newFundingRateVelocity = await this.getCurrentVelocity(market);
+
+        // Update them in the database
+        await this.databaseService.update<Market>(
+          'markets',
+          {
+            fundingRate: currentFundingRate,
+            fundingRateVelocity: newFundingRateVelocity,
+          },
+          { id: market.id },
+        );
+      }),
     );
   }
 
@@ -62,6 +79,10 @@ export class MarketService {
       borrowingRate: dto.borrowingRate || '0.0003',
       lastUpdatedTimestamp: Date.now(),
       availableLiquidity: dto.availableLiquidity || '0',
+      cumulativeFeesSol: '0',
+      cumulativeFeesUsdc: '0',
+      unclaimedFeesSol: '0',
+      unclaimedFeesUsdc: '0',
     });
 
     // Initialize market stats
@@ -234,101 +255,45 @@ export class MarketService {
     return marketInfo;
   }
 
-  async updateFundingRate(marketId: string): Promise<void> {
-    const market = await this.getMarketById(marketId);
-    const newFundingRate = await this.calculateFundingRate(market);
-
-    await this.databaseService.update<Market>(
-      'markets',
-      { fundingRate: newFundingRate },
-      { id: marketId },
-    );
-
-    await this.invalidateMarketCache();
-  }
-
-  async getFundingRate(marketId: string): Promise<{
-    currentRate: string;
-    estimatedRate: string;
-    unrecordedFunding: string;
-  }> {
+  async getFundingRate(marketId: string): Promise<string> {
     const market = await this.getMarketById(marketId);
 
-    // Calculate current funding rate
-    const currentFundingRate = await this.calculateFundingRate(market);
-
-    // Calculate unrecorded funding
-    const unrecordedFunding = await this.calculateUnrecordedFunding(market);
-
-    // Compute estimated rate
-    const estimatedRate = (
-      Number(currentFundingRate) + Number(unrecordedFunding)
-    ).toFixed(8);
-
-    return {
-      currentRate: currentFundingRate,
-      estimatedRate,
-      unrecordedFunding,
-    };
+    return await this.getCurrentFundingRate(market);
   }
 
-  private async calculateFundingRate(market: Market): Promise<string> {
-    const now = Date.now();
-    const timeElapsed = (now - market.lastUpdatedTimestamp) / 1000;
-
-    // Calculate skew and skewScale dynamically
-    const longOI = Number(market.longOpenInterest);
-    const shortOI = Number(market.shortOpenInterest);
-    const skew = longOI - shortOI;
-    const skewScale = longOI + shortOI;
-
-    // Avoid division by zero
-    const proportionalSkew = skewScale > 0 ? skew / skewScale : 0;
-
-    // Scale maxFundingVelocity to the elapsed time
-    const maxVelocityPerSecond = Number(market.maxFundingVelocity) / 86400;
-    const clampedVelocity =
-      Math.min(maxVelocityPerSecond * timeElapsed, Math.abs(proportionalSkew)) *
-      Math.sign(proportionalSkew);
-
-    const newFundingRateVelocity =
-      Number(market.fundingRateVelocity) + clampedVelocity;
-
-    // Scale maxFundingRate to the elapsed time
-    const maxRatePerSecond = Number(market.maxFundingRate) / 86400;
-    let currentFundingRate =
-      Number(market.fundingRate) +
-      newFundingRateVelocity * (timeElapsed / 86400);
-
-    // Clamp funding rate
-    currentFundingRate = Math.max(
-      -maxRatePerSecond * timeElapsed,
-      Math.min(maxRatePerSecond * timeElapsed, currentFundingRate),
+  /**
+   * @dev currentFundingRate = fundingRate + fundingRateVelocity * timeElapsed
+   * @audit make sure to clamp between max and min
+   */
+  private async getCurrentFundingRate(market: Market): Promise<string> {
+    const proportionalTimeElapsed = divide(
+      Date.now() - market.lastUpdatedTimestamp,
+      SECONDS_IN_DAY,
     );
 
-    // Update market properties
-    await this.databaseService.update<Market>(
-      'markets',
-      {
-        fundingRateVelocity: newFundingRateVelocity.toString(),
-        lastUpdatedTimestamp: now,
-      },
-      { id: market.id },
+    const currentFundingRate = add(
+      market.fundingRate,
+      multiply(market.fundingRateVelocity, proportionalTimeElapsed),
     );
 
-    return currentFundingRate.toFixed(8);
+    return currentFundingRate;
   }
 
-  private async calculateUnrecordedFunding(market: Market): Promise<string> {
-    const now = Date.now();
-    const timeElapsed = (now - market.lastUpdatedTimestamp) / 1000; // in seconds
+  /**
+   * @dev proportionalSkew = skew / skewScale
+   * @dev velocity         = proportionalSkew * maxFundingVelocity
+   */
+  private async getCurrentVelocity(market: Market): Promise<string> {
+    const skew = subtract(market.longOpenInterest, market.shortOpenInterest);
 
-    const currentFundingRate = await this.calculateFundingRate(market);
-    const avgFundingRate =
-      -(Number(market.fundingRate) + Number(currentFundingRate)) / 2;
+    const skewScale = add(market.longOpenInterest, market.shortOpenInterest);
 
-    const unrecordedFunding = avgFundingRate * (timeElapsed / 86400); // seconds in a day
-    return unrecordedFunding.toFixed(8); // Return a string with 8 decimal places
+    const proportionalSkew = divide(skew, skewScale);
+
+    // Clamp proportionalSkew between -1 and 1
+    const pSkewBounded = clamp(proportionalSkew, -1, 1);
+
+    return multiply(pSkewBounded, market.maxFundingVelocity);
   }
 
   private async invalidateMarketCache(market?: Market): Promise<void> {
@@ -346,34 +311,57 @@ export class MarketService {
   }
 
   /**
-   * @warning CLEARS FEES TO 0! MAKE SURE TO NOTE FEES DOWN IN
+   * @dev CLEARS FEES TO 0! MAKE SURE TO NOTE FEES DOWN IN
    * ORDER TO HANDLE DISTRIBUTION OF REWARDS!!
    */
-  async claimFees(marketId: string): Promise<{ claimedAmount: string }> {
+  async claimFees(
+    marketId: string,
+    token: TokenType,
+  ): Promise<{ claimedAmount: string }> {
     const market = await this.getMarketById(marketId);
-    const claimedAmount = market.unclaimedFees;
 
-    await this.databaseService.update<Market>(
-      'markets',
-      { unclaimedFees: '0' },
-      { id: marketId },
-    );
+    let claimedAmount: string;
+    const updateData: Partial<Market> = {};
+
+    if (token === TokenType.SOL) {
+      claimedAmount = market.unclaimedFeesSol;
+      updateData.unclaimedFeesSol = '0';
+    } else if (token === TokenType.USDC) {
+      claimedAmount = market.unclaimedFeesUsdc;
+      updateData.unclaimedFeesUsdc = '0';
+    } else {
+      throw new Error('Invalid token type');
+    }
+
+    await this.databaseService.update<Market>('markets', updateData, {
+      id: marketId,
+    });
 
     await this.invalidateMarketCache();
     return { claimedAmount };
   }
 
-  async addTradingFees(marketId: string, fees: string): Promise<void> {
+  async addTradingFees(
+    marketId: string,
+    fees: string,
+    token: TokenType,
+  ): Promise<void> {
     const market = await this.getMarketById(marketId);
+    const updateData: Partial<Market> = {};
 
-    await this.databaseService.update<Market>(
-      'markets',
-      {
-        cumulativeFees: add(market.cumulativeFees, fees),
-        unclaimedFees: add(market.unclaimedFees, fees),
-      },
-      { id: marketId },
-    );
+    if (token === TokenType.SOL) {
+      updateData.cumulativeFeesSol = add(market.cumulativeFeesSol, fees);
+      updateData.unclaimedFeesSol = add(market.unclaimedFeesSol, fees);
+    } else if (token === TokenType.USDC) {
+      updateData.cumulativeFeesUsdc = add(market.cumulativeFeesUsdc, fees);
+      updateData.unclaimedFeesUsdc = add(market.unclaimedFeesUsdc, fees);
+    } else {
+      throw new Error('Invalid token type');
+    }
+
+    await this.databaseService.update<Market>('markets', updateData, {
+      id: marketId,
+    });
 
     await this.invalidateMarketCache();
   }
