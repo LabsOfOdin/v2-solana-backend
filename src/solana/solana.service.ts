@@ -7,6 +7,7 @@ import {
 } from '@solana/web3.js';
 import { TokenType } from 'src/types/token.types';
 import { getSolanaConfig } from 'src/common/config';
+import { getAssociatedTokenAddress } from '@solana/spl-token';
 
 @Injectable()
 export class SolanaService {
@@ -53,12 +54,23 @@ export class SolanaService {
       throw new Error('Transaction not from specified sender');
     }
 
-    // 4. Verify recipient is protocol wallet
-    if (
-      !tx.transaction.message.accountKeys.some((key) =>
+    // 4. Verify recipient is protocol wallet or its ATA
+    let validDestination = false;
+    if (token === TokenType.SOL) {
+      validDestination = tx.transaction.message.accountKeys.some((key) =>
         key.pubkey.equals(this.PROTOCOL_WALLET),
-      )
-    ) {
+      );
+    } else if (token === TokenType.USDC) {
+      const protocolATA = await getAssociatedTokenAddress(
+        this.USDC_MINT,
+        this.PROTOCOL_WALLET,
+      );
+      validDestination = tx.transaction.message.accountKeys.some((key) =>
+        key.pubkey.equals(protocolATA),
+      );
+    }
+
+    if (!validDestination) {
       throw new Error('Transaction not sent to protocol wallet');
     }
 
@@ -72,6 +84,10 @@ export class SolanaService {
     token: TokenType,
   ): Promise<void> {
     const instructions = tx.transaction.message.instructions;
+    console.log(
+      'Checking instructions:',
+      JSON.stringify(instructions, null, 2),
+    );
 
     let foundTransfer = false;
 
@@ -83,12 +99,11 @@ export class SolanaService {
         if (type === 'transfer' || type === 'transferChecked') {
           // For USDC transfers
           if (token === TokenType.USDC) {
-            if (info.mint?.equals(this.USDC_MINT)) {
-              const amount = Number(info.amount) / 1e6; // USDC has 6 decimals
-              if (Math.abs(amount - Number(expectedAmount)) < 1e-8) {
-                foundTransfer = true;
-                break;
-              }
+            const amount = Number(info.amount) / 1e6; // USDC has 6 decimals
+
+            if (Math.abs(amount - Number(expectedAmount)) < 1e-8) {
+              foundTransfer = true;
+              break;
             }
           }
         }
@@ -100,8 +115,10 @@ export class SolanaService {
         token === TokenType.SOL
       ) {
         const { type, info } = ix.parsed;
+
         if (type === 'transfer') {
           const amount = Number(info.lamports) / LAMPORTS_PER_SOL;
+
           if (Math.abs(amount - Number(expectedAmount)) < 1e-8) {
             foundTransfer = true;
             break;
