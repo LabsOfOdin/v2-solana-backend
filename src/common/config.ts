@@ -7,7 +7,7 @@ const SOLANA_CONFIG = {
   DEVNET: {
     RPC_URL: 'https://api.devnet.solana.com',
     PROTOCOL_WALLET: '2WopEVinpz5MrjJcQppuvE2C5m14iPE5XNR8a2wsCs4C',
-    USDC_MINT: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', // Devnet USDC mint
+    USDC_MINT: '7ggkvgP7jijLpQBV5GXcqugTMrc2JqDi9tiCH36SVg7A', // Devnet USDC mint
   },
   MAINNET: {
     RPC_URL: 'https://api.mainnet-beta.solana.com',
