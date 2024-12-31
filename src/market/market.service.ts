@@ -263,7 +263,6 @@ export class MarketService {
 
   /**
    * @dev currentFundingRate = fundingRate + fundingRateVelocity * timeElapsed
-   * @audit make sure to clamp between max and min
    */
   private async getCurrentFundingRate(market: Market): Promise<string> {
     const proportionalTimeElapsed = divide(
@@ -276,7 +275,13 @@ export class MarketService {
       multiply(market.fundingRateVelocity, proportionalTimeElapsed),
     );
 
-    return currentFundingRate;
+    let clampedFundingRate = clamp(
+      currentFundingRate,
+      multiply(market.maxFundingRate, -1),
+      market.maxFundingRate,
+    );
+
+    return clampedFundingRate;
   }
 
   /**

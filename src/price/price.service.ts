@@ -328,10 +328,6 @@ export class PriceService {
     this.priceHistory.set(tokenAddress, history);
   }
 
-  /**
-   * @audit Adjust price history length in period of volatility, or on a per-market
-   * basis. If boolean flag is set (twapActivated), default to 5 mins.
-   */
   private computeTwap(tokenAddress: string, fallbackPrice: number): number {
     const history = this.priceHistory.get(tokenAddress) || [];
     // If no history, return the freshly fetched 'fallbackPrice'

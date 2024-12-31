@@ -37,6 +37,7 @@ export class MarginService {
   /**
    * @audit We can probably make this automatically detect margin deposits.
    * But will need some security features --> reduce by transfers out etc.
+   * Bind withdrawals first, so we know what to check for on the out side.
    */
   async depositMargin(
     user: User,
