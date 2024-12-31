@@ -314,18 +314,121 @@ export class MarginService {
   }
 
   /**
-   * @audit Implement
+   * @dev Reduces the user's availableBalance
    */
   async deductMargin(
     userId: string,
     token: TokenType,
     amount: string,
   ): Promise<void> {
-    // In production, this would:
-    // 1. Check if user has enough margin
-    // 2. Update user's margin balance
-    // 3. Record the deduction in history
-    // For now, just mock the implementation
-    console.log(`Deducting ${amount} ${token} from user ${userId}`);
+    if (!this.SUPPORTED_TOKENS.has(token)) {
+      throw new InvalidTokenError(
+        `Token ${token} is not supported for margin deductions`,
+      );
+    }
+
+    // Get current margin balance
+    const marginBalance = await this.userService.getMarginBalance(
+      userId,
+      token,
+    );
+
+    // Check if user has enough available margin
+    if (compare(marginBalance.availableBalance, amount) < 0) {
+      throw new InsufficientMarginError('Insufficient available margin');
+    }
+
+    // Calculate new available balance
+    const newAvailableBalance = subtract(
+      marginBalance.availableBalance,
+      amount,
+    );
+
+    // Update balance in database
+    await this.userService.updateMarginBalance(
+      userId,
+      token,
+      newAvailableBalance,
+      marginBalance.lockedBalance,
+      marginBalance.unrealizedPnl,
+    );
+
+    // Emit balance update event
+    this.eventsService.emitBalancesUpdate(userId);
+  }
+
+  /**
+   * @dev Reduces the user's locked margin.
+   * Useful for charging borrowing fees.
+   */
+  async reduceLockedMargin(
+    userId: string,
+    token: TokenType,
+    amount: string,
+  ): Promise<void> {
+    if (!this.SUPPORTED_TOKENS.has(token)) {
+      throw new InvalidTokenError(
+        `Token ${token} is not supported for margin reductions`,
+      );
+    }
+
+    // Get current margin balance
+    const marginBalance = await this.userService.getMarginBalance(
+      userId,
+      token,
+    );
+
+    // Check if user has enough locked margin
+    if (compare(marginBalance.lockedBalance, amount) < 0) {
+      throw new InsufficientMarginError('Insufficient locked margin');
+    }
+
+    // Calculate new locked balance
+    const newLockedBalance = subtract(marginBalance.lockedBalance, amount);
+
+    // Update balance in database
+    await this.userService.updateMarginBalance(
+      userId,
+      token,
+      marginBalance.availableBalance,
+      newLockedBalance,
+      marginBalance.unrealizedPnl,
+    );
+
+    // Emit balance update event
+    this.eventsService.emitBalancesUpdate(userId);
+  }
+
+  async addToLockedMargin(
+    userId: string,
+    token: TokenType,
+    amount: string,
+  ): Promise<void> {
+    if (!this.SUPPORTED_TOKENS.has(token)) {
+      throw new InvalidTokenError(
+        `Token ${token} is not supported for margin additions`,
+      );
+    }
+
+    // Get current margin balance
+    const marginBalance = await this.userService.getMarginBalance(
+      userId,
+      token,
+    );
+
+    // Calculate new locked balance
+    const newLockedBalance = add(marginBalance.lockedBalance, amount);
+
+    // Update balance in database
+    await this.userService.updateMarginBalance(
+      userId,
+      token,
+      marginBalance.availableBalance,
+      newLockedBalance,
+      marginBalance.unrealizedPnl,
+    );
+
+    // Emit balance update event
+    this.eventsService.emitBalancesUpdate(userId);
   }
 }

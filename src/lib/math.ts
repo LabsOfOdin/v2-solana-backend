@@ -161,3 +161,31 @@ export function eq(a: string, b: string): boolean {
 export function lt(a: string, b: string): boolean {
   return new Decimal(a).lessThan(new Decimal(b));
 }
+
+/**
+ * Calculates the arithmetic mean (average) of two or more numbers
+ */
+export function avg(...numbers: (number | string)[]): string {
+  if (numbers.length === 0) {
+    throw new Error('Cannot calculate average of empty array');
+  }
+  const sum = add(...numbers);
+  return divide(sum, numbers.length);
+}
+
+/**
+ * Clamps a number between min and max values (inclusive)
+ */
+export function clamp(
+  number: number | string,
+  min: number | string,
+  max: number | string,
+): string {
+  const value = new Decimal(number);
+  const minValue = new Decimal(min);
+  const maxValue = new Decimal(max);
+
+  if (value.lessThan(minValue)) return minValue.toString();
+  if (value.greaterThan(maxValue)) return maxValue.toString();
+  return value.toString();
+}

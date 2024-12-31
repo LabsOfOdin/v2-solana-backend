@@ -18,6 +18,7 @@ const SOLANA_CONFIG = {
 
 export const LIQUIDITY_SCALAR = '0.5';
 export const TRADING_FEE = '0.001'; // 0.1% trading fee
+export const SECONDS_IN_DAY = '86400';
 
 export const getAdminWallet = () => {
   const isDevnet = process.env.NODE_ENV === 'development';

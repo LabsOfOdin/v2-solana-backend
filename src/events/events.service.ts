@@ -17,6 +17,15 @@ interface PositionUpdate {
   timestamp: string;
 }
 
+interface FundingFeeEvent {
+  userId: string;
+  positionId: string;
+  marketId: string;
+  feeUsd: string;
+  feeToken: string;
+  token: TokenType;
+}
+
 @Injectable()
 export class EventsService {
   private positionsSubject = new Subject<PositionUpdate>();
@@ -54,5 +63,10 @@ export class EventsService {
       userId,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  emitFundingFeeCharged(event: FundingFeeEvent): void {
+    // In production, this would emit the event to a message queue or websocket
+    console.log('Funding fee charged:', event);
   }
 }

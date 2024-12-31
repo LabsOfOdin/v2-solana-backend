@@ -8,7 +8,6 @@ import {
 import { Position, PositionStatus } from '../entities/position.entity';
 import { Market } from '../entities/market.entity';
 import { PriceService } from '../price/price.service';
-import { LiquidityService } from '../liquidity/liquidity.service';
 import { CacheService } from '../utils/cache.service';
 import { CACHE_TTL, getCacheKey } from '../constants/cache.constants';
 import { OrderRequest, OrderSide, Trade } from '../types/trade.types';
@@ -16,22 +15,9 @@ import { Trade as TradeEntity } from '../entities/trade.entity';
 import { MarginService } from '../margin/margin.service';
 import { TokenType } from 'src/types/token.types';
 import { EventsService } from '../events/events.service';
-import { LIQUIDITY_SCALAR, TRADING_FEE } from '../common/config';
+import { TRADING_FEE } from '../common/config';
 import { MarketService } from '../market/market.service';
-import { MarginBalance } from 'src/entities/margin-balance.entity';
-import {
-  abs,
-  add,
-  compare,
-  divide,
-  isNegative,
-  isPositive,
-  isZero,
-  lt,
-  min,
-  multiply,
-  subtract,
-} from 'src/lib/math';
+import { abs, add, compare, divide, multiply, subtract } from 'src/lib/math';
 import { DatabaseService } from 'src/database/database.service';
 import { StatsService } from '../stats/stats.service';
 import { calculatePnlUSD } from 'src/lib/calculatePnlUsd';
@@ -266,12 +252,32 @@ export class TradeService {
         amountToLock = divide(requiredMarginUSD, solPrice);
       }
 
+      // 8. Calculate fees for opening position
+      const fee = this.calculateFee(orderRequest.size, isSol ? solPrice : 1);
+
+      // 9. Subtract fee from amount to lock
+      amountToLock = subtract(amountToLock, fee);
+
       // PART 3: Database Updates (all or nothing)
       // -------------------------------------
 
       const positionId = crypto.randomUUID();
 
-      // 1. Lock margin
+      // 1. Subtract fee from the user's margin balance
+      await this.marginService.deductMargin(
+        orderRequest.userId,
+        orderRequest.token,
+        fee,
+      );
+
+      // 2. Increase the accumulated fees in storage
+      await this.marketService.addTradingFees(
+        market.id,
+        fee,
+        orderRequest.token,
+      );
+
+      // 3. Lock margin
       await this.marginService.lockMargin(
         orderRequest.userId,
         orderRequest.token,
@@ -279,7 +285,7 @@ export class TradeService {
         positionId,
       );
 
-      // 2. Update market's impact pool
+      // 4. Update market's impact pool
       await this.marketService.updateMarket(market.id, {
         impactPool: updatedImpactPool,
         longOpenInterest:
@@ -292,7 +298,7 @@ export class TradeService {
             : market.shortOpenInterest,
       });
 
-      // 3. Create position
+      // 5. Create position
       const [position] = await this.databaseService.insert('positions', {
         id: positionId,
         userId: orderRequest.userId,
@@ -423,7 +429,10 @@ export class TradeService {
         price: currentPrice,
         leverage: position.leverage,
         realizedPnl: realizedPnlUSD,
-        fee: this.calculateFee(sizeDelta, currentPrice),
+        fee: this.calculateFee(
+          sizeDelta,
+          position.token === TokenType.SOL ? solPrice : 1,
+        ),
         createdAt: new Date(),
       };
 
@@ -1117,16 +1126,19 @@ export class TradeService {
     return divide(priceImpact, size);
   }
 
-  private calculateFee(size: string, price: string): string {
+  private calculateFee(size: string, collateralPrice: number): string {
     try {
-      if (!size || !price) {
+      if (!size || !collateralPrice) {
         throw new BadRequestException(
           'Size and price are required for fee calculation',
         );
       }
 
-      const notionalValue = multiply(size, price);
-      return multiply(notionalValue, '0.0005'); // 0.05% fee
+      const feeUsd = multiply(size, TRADING_FEE);
+
+      const feeCollateral = divide(feeUsd, collateralPrice);
+
+      return feeCollateral;
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw error;
@@ -1229,15 +1241,6 @@ export class TradeService {
       }
       throw new InternalServerErrorException('Failed to get user positions');
     }
-  }
-
-  private getAvailableOI(market: Market, side: OrderSide): string {
-    return subtract(
-      market.maxLeverage,
-      side === OrderSide.LONG
-        ? market.longOpenInterest
-        : market.shortOpenInterest,
-    );
   }
 
   async getPositionTrades(positionId: string): Promise<TradeEntity[]> {

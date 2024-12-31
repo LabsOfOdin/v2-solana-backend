@@ -16,6 +16,10 @@ export interface CreateMarketDto {
   maxFundingRate?: string;
   maxFundingVelocity?: string;
   availableLiquidity?: string;
+  cumulativeFeesSol?: string;
+  cumulativeFeesUsdc?: string;
+  unclaimedFeesSol?: string;
+  unclaimedFeesUsdc?: string;
 }
 
 export interface UpdateMarketDto {
@@ -31,6 +35,10 @@ export interface UpdateMarketDto {
   maxFundingVelocity?: string;
   impactPool?: string;
   availableLiquidity?: string;
+  cumulativeFeesSol?: string;
+  cumulativeFeesUsdc?: string;
+  unclaimedFeesSol?: string;
+  unclaimedFeesUsdc?: string;
 }
 
 export interface MarketInfo {

@@ -30,6 +30,7 @@ export interface Position {
   accumulatedFunding: string;
   accumulatedBorrowingFee: string;
   lastBorrowingFeeUpdate: Date;
+  lastFundingUpdate: Date;
   createdAt: Date;
   updatedAt: Date;
 }
