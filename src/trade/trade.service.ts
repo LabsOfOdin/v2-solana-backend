@@ -321,11 +321,8 @@ export class TradeService {
       // -------------------------------------
 
       // Emit position update event (non-critical)
-      try {
-        this.eventsService.emitPositionsUpdate(orderRequest.userId);
-      } catch (error) {
-        console.error('Failed to emit position update:', error);
-      }
+
+      this.eventsService.emitPositionsUpdate(orderRequest.userId);
 
       return position.status === PositionStatus.OPEN;
     } catch (error) {
