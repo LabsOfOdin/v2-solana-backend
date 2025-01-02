@@ -6,6 +6,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { PriceService } from './price.service';
+import { PublicKey } from '@solana/web3.js';
 
 @Controller('price')
 export class PriceController {
@@ -50,6 +51,23 @@ export class PriceController {
       );
     } catch (error) {
       throw new NotFoundException('Params Error');
+    }
+  }
+
+  @Get('dao-curves')
+  async getAllCurves(): Promise<PublicKey[]> {
+    return this.priceService.getAllCurves();
+  }
+
+  @Get('dao/:depositor')
+  async getDaoPrice(@Param('depositor') depositor: string) {
+    try {
+      const depositorPubkey = new PublicKey(depositor);
+      return await this.priceService.getDaoPrice(depositorPubkey);
+    } catch (error) {
+      throw new NotFoundException(
+        'Invalid depositor address or price not found',
+      );
     }
   }
 }

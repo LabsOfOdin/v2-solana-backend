@@ -4,7 +4,13 @@ import { RateLimiter } from 'limiter';
 import { Cache } from 'cache-manager';
 import * as WebSocket from 'ws';
 import { MarketService } from 'src/market/market.service';
-
+import { Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import { Program, BN, AnchorProvider } from '@coral-xyz/anchor';
+import { VIRTUAL_XYK_IDL } from 'src/lib/idl/virtual_xyk';
+import { VirtualXyk } from 'src/lib/idl/virtual_xyk.types';
+import { CurveUtil } from 'src/lib/virtual-helpers';
+import { multiply } from 'src/lib/math';
+import { getListedDaos, SOLANA_CONFIG } from 'src/common/config';
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
  * the Jupiter Swap API. Perhaps the QuickNode version if that enables us to get websocket connections.
@@ -38,6 +44,12 @@ export class PriceService {
   private priceHistory: Map<string, { timestamp: number; price: number }[]> =
     new Map();
 
+  private daoWebSocket: WebSocket;
+  private daoWsConnected: boolean = false;
+  private daoPrices: Map<string, number> = new Map(); // ticker -> price
+  private readonly SOLANA_WS_URL =
+    'wss://spring-snowy-telescope.solana-mainnet.quiknode.pro/734a01c9192bece76b7b324bc0c19e91cbdd8ce1';
+
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     @Inject(forwardRef(() => MarketService))
@@ -45,6 +57,7 @@ export class PriceService {
   ) {
     // Initialize WebSocket connections
     this.connectBinanceWebSocket();
+    this.connectDaoWebSocket();
     // Fetch initial prices
     this.fetchInitialPrices();
   }
@@ -56,7 +69,7 @@ export class PriceService {
   async getCurrentPrice(marketId: string): Promise<string> {
     const market = await this.marketService.getMarketById(marketId);
 
-    const price = await this.getDexPrice(market.tokenAddress, market.symbol);
+    const price = this.daoPrices.get(market.symbol);
 
     this.updatePriceHistory(market.tokenAddress, price);
 
@@ -178,6 +191,11 @@ export class PriceService {
    * ========================== Private Methods ==========================
    */
 
+  /**
+   * @dev Returns the price from Jupiter Swap API.
+   * We can potentially just implement this ourselves as it may be more accurate for
+   * blue chip prices like AI16Z.
+   */
   private async getDexPrice(
     tokenAddress: string,
     ticker: string,
@@ -252,6 +270,76 @@ export class PriceService {
     }
   }
 
+  async getAllCurves(): Promise<PublicKey[]> {
+    const connection = new Connection(
+      'https://spring-snowy-telescope.solana-mainnet.quiknode.pro/734a01c9192bece76b7b324bc0c19e91cbdd8ce1',
+    );
+    const programAccounts = await connection.getProgramAccounts(
+      new PublicKey(VIRTUAL_XYK_IDL.address),
+      {
+        filters: [
+          // Filter for accounts with the correct size (177 bytes as shown in mock.ts)
+          {
+            dataSize: 177,
+          },
+        ],
+      },
+    );
+
+    return programAccounts.map((account) => account.pubkey);
+  }
+
+  /**
+   * @param curvePda is the mint authority of the LP token.
+   * To find this, get the LP token from Daos Fun site and from
+   * there copy over its mint authority.
+   */
+  async getDaoPrice(curvePda: PublicKey): Promise<string> {
+    try {
+      const connection = new Connection(SOLANA_CONFIG.MAINNET.RPC_URL);
+      const provider = new AnchorProvider(connection, null, {});
+
+      // Create program instance
+      const program = new Program<VirtualXyk>(
+        VIRTUAL_XYK_IDL as VirtualXyk,
+        provider,
+      );
+
+      // Fetch curve account
+      const curve = await program.account.curve.fetch(curvePda);
+      if (!curve) {
+        throw new Error('Curve account not found');
+      }
+
+      // Use the CurveUtil helper to calculate token values
+      const curveHelper = CurveUtil(curve);
+
+      // Get SOL price for 1 token
+      const priceInSol =
+        curveHelper.token_value_sol(new BN(LAMPORTS_PER_SOL)).toNumber() /
+        LAMPORTS_PER_SOL;
+
+      // Get current SOL/USD price from an oracle
+      const solUsdPrice = await this.getSolPrice();
+      if (!solUsdPrice || solUsdPrice <= 0) {
+        throw new Error('Invalid SOL price');
+      }
+
+      // Calculate USD price
+      const usdPrice = multiply(priceInSol, solUsdPrice);
+
+      return usdPrice;
+    } catch (error) {
+      console.error(
+        `Error getting DAO price for curve ${curvePda.toString()}:`,
+        this.getErrorMessage(error),
+      );
+      throw new Error(
+        `Failed to get DAO price: ${this.getErrorMessage(error)}`,
+      );
+    }
+  }
+
   /**
    * ========================== WS Methods ==========================
    */
@@ -305,6 +393,59 @@ export class PriceService {
       console.log('Attempting to reconnect to Binance...');
       this.connectBinanceWebSocket();
     }
+  }
+
+  private connectDaoWebSocket() {
+    const listedDaos = getListedDaos();
+    const connection = new Connection(SOLANA_CONFIG.MAINNET.RPC_URL, {
+      wsEndpoint: SOLANA_CONFIG.MAINNET.WS_URL,
+      commitment: 'confirmed',
+    });
+
+    // Subscribe to account changes for each DAO's curve
+    Object.entries(listedDaos).forEach(([ticker, curvePda]) => {
+      const pubkey = new PublicKey(curvePda);
+      connection.onAccountChange(
+        pubkey,
+        async () => {
+          try {
+            const price = await this.getDaoPrice(pubkey);
+            this.daoPrices.set(ticker, Number(price));
+          } catch (error) {
+            console.error(
+              `Error updating ${ticker} price:`,
+              this.getErrorMessage(error),
+            );
+          }
+        },
+        {
+          commitment: 'confirmed',
+        },
+      );
+    });
+
+    // Initialize prices
+    this.initializeDaoPrices();
+
+    console.log('Dao Websocket Connected');
+  }
+
+  private async initializeDaoPrices() {
+    const listedDaos = getListedDaos();
+
+    await Promise.all(
+      Object.entries(listedDaos).map(async ([ticker, curvePda]) => {
+        try {
+          const price = await this.getDaoPrice(new PublicKey(curvePda));
+          this.daoPrices.set(ticker, Number(price));
+        } catch (error) {
+          console.error(
+            `Error initializing ${ticker} price:`,
+            this.getErrorMessage(error),
+          );
+        }
+      }),
+    );
   }
 
   /**
@@ -419,5 +560,13 @@ export class PriceService {
         this.getErrorMessage(error),
       );
     }
+  }
+
+  public getDaoPriceByTicker(ticker: string): number {
+    const price = this.daoPrices.get(ticker);
+    if (!price) {
+      throw new Error(`Price not found for ${ticker}`);
+    }
+    return price;
   }
 }
