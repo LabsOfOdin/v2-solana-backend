@@ -44,11 +44,7 @@ export class PriceService {
   private priceHistory: Map<string, { timestamp: number; price: number }[]> =
     new Map();
 
-  private daoWebSocket: WebSocket;
-  private daoWsConnected: boolean = false;
   private daoPrices: Map<string, number> = new Map(); // ticker -> price
-  private readonly SOLANA_WS_URL =
-    'wss://spring-snowy-telescope.solana-mainnet.quiknode.pro/734a01c9192bece76b7b324bc0c19e91cbdd8ce1';
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
@@ -69,7 +65,11 @@ export class PriceService {
   async getCurrentPrice(marketId: string): Promise<string> {
     const market = await this.marketService.getMarketById(marketId);
 
-    const price = this.daoPrices.get(market.symbol);
+    const price = this.daoPrices.get(market.symbol.toUpperCase());
+
+    if (!price) {
+      throw new Error(`Price not found for ${market.symbol}`);
+    }
 
     this.updatePriceHistory(market.tokenAddress, price);
 
@@ -410,7 +410,7 @@ export class PriceService {
         async () => {
           try {
             const price = await this.getDaoPrice(pubkey);
-            this.daoPrices.set(ticker, Number(price));
+            this.daoPrices.set(ticker.toUpperCase(), Number(price));
           } catch (error) {
             console.error(
               `Error updating ${ticker} price:`,
@@ -437,7 +437,7 @@ export class PriceService {
       Object.entries(listedDaos).map(async ([ticker, curvePda]) => {
         try {
           const price = await this.getDaoPrice(new PublicKey(curvePda));
-          this.daoPrices.set(ticker, Number(price));
+          this.daoPrices.set(ticker.toUpperCase(), Number(price));
         } catch (error) {
           console.error(
             `Error initializing ${ticker} price:`,
@@ -563,7 +563,7 @@ export class PriceService {
   }
 
   public getDaoPriceByTicker(ticker: string): number {
-    const price = this.daoPrices.get(ticker);
+    const price = this.daoPrices.get(ticker.toUpperCase());
     if (!price) {
       throw new Error(`Price not found for ${ticker}`);
     }
