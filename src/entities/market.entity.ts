@@ -15,7 +15,9 @@ export interface Market {
   lastUpdatedTimestamp: number;
   longOpenInterest: string;
   shortOpenInterest: string;
-  impactPool: string;
+  virtualBaseReserve: string;
+  virtualQuoteReserve: string;
+  virtualK: string;
   cumulativeFeesSol: string;
   cumulativeFeesUsdc: string;
   unclaimedFeesSol: string;

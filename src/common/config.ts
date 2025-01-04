@@ -23,6 +23,7 @@ export const LIQUIDITY_SCALAR = '0.5';
 export const TRADING_FEE = '0.001'; // 0.1% trading fee
 export const SECONDS_IN_DAY = '86400';
 
+// Caps All Names
 export const LISTED_DAOS = {
   DEVNET: {
     TOPKEK: 'CmqpcL5cyCHVobHYcq7dhqjrshFNVFNbQifRKMYZ2kYP',

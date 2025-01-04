@@ -20,9 +20,14 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { add, clamp, divide, multiply, subtract } from 'src/lib/math';
 import { TokenType } from 'src/types/token.types';
 import { SECONDS_IN_DAY } from 'src/common/config';
+import { OrderSide } from 'src/types/trade.types';
 
 @Injectable()
 export class MarketService {
+  // Initial virtual AMM reserves and k value
+  private readonly INITIAL_RESERVE_BALANCE = 1_000_000; // $1M each side
+  private readonly SPL_BASE_UNIT = 1e9;
+  private readonly USDC_BASE_UNIT = 1e6;
   constructor(
     private readonly databaseService: DatabaseService,
     @Inject(forwardRef(() => PriceService))
@@ -37,17 +42,13 @@ export class MarketService {
 
     await Promise.all(
       markets.map(async (market) => {
-        // Calculate the new rate and velocity
-        const currentFundingRate = await this.getCurrentFundingRate(market);
+        // Calculate new funding rate based on price difference
+        const newFundingRate = await this.calculateFundingRate(market);
 
-        const newFundingRateVelocity = await this.getCurrentVelocity(market);
-
-        // Update them in the database
         await this.databaseService.update<Market>(
           'markets',
           {
-            fundingRate: currentFundingRate,
-            fundingRateVelocity: newFundingRateVelocity,
+            fundingRate: newFundingRate,
           },
           { id: market.id },
         );
@@ -55,6 +56,9 @@ export class MarketService {
     );
   }
 
+  /**
+   * @audit - Make vAMM model optional --> tokens with sufficient liq can avoid?
+   */
   async createMarket(dto: CreateMarketDto): Promise<Market> {
     const [existingMarket] = await this.databaseService.select<Market>(
       'markets',
@@ -67,6 +71,30 @@ export class MarketService {
     if (existingMarket) {
       throw new ConflictException(`Market ${dto.symbol} already exists`);
     }
+
+    // Get initial oracle price
+    const initialPrice = await this.priceService.getCurrentPrice(
+      dto.tokenAddress,
+    );
+
+    /**
+     * $1m / price = tokens --> expand to base 9
+     * e.g price = $2.22
+     * $1m of asset = 450,450 tokens
+     * expand to base 9 = 450,450 * 1e9 = 450,450.000_000_000
+     * Rounded to nearest integer.
+     */
+    const baseReserve = Math.round(
+      Number(
+        multiply(
+          divide(this.INITIAL_RESERVE_BALANCE, initialPrice),
+          this.SPL_BASE_UNIT,
+        ),
+      ),
+    ).toString();
+    // Convert 1m USD to USDC by expanding units to base 6
+    const quoteReserve = multiply(baseReserve, this.USDC_BASE_UNIT);
+    const k = multiply(baseReserve, quoteReserve);
 
     const [market] = await this.databaseService.insert<Market>('markets', {
       ...dto,
@@ -83,6 +111,10 @@ export class MarketService {
       cumulativeFeesUsdc: '0',
       unclaimedFeesSol: '0',
       unclaimedFeesUsdc: '0',
+      // Virtual AMM initialization
+      virtualBaseReserve: baseReserve,
+      virtualQuoteReserve: quoteReserve,
+      virtualK: k,
     });
 
     // Initialize market stats
@@ -93,7 +125,6 @@ export class MarketService {
   }
 
   async updateMarket(marketId: string, dto: UpdateMarketDto): Promise<Market> {
-    const market = await this.getMarketById(marketId);
     const updateData: Partial<Market> = { ...dto };
 
     if (dto.longOpenInterest) {
@@ -258,47 +289,7 @@ export class MarketService {
   async getFundingRate(marketId: string): Promise<string> {
     const market = await this.getMarketById(marketId);
 
-    return await this.getCurrentFundingRate(market);
-  }
-
-  /**
-   * @dev currentFundingRate = fundingRate + fundingRateVelocity * timeElapsed
-   */
-  private async getCurrentFundingRate(market: Market): Promise<string> {
-    const proportionalTimeElapsed = divide(
-      Date.now() - market.lastUpdatedTimestamp,
-      SECONDS_IN_DAY,
-    );
-
-    const currentFundingRate = add(
-      market.fundingRate,
-      multiply(market.fundingRateVelocity, proportionalTimeElapsed),
-    );
-
-    let clampedFundingRate = clamp(
-      currentFundingRate,
-      multiply(market.maxFundingRate, -1),
-      market.maxFundingRate,
-    );
-
-    return clampedFundingRate;
-  }
-
-  /**
-   * @dev proportionalSkew = skew / skewScale
-   * @dev velocity         = proportionalSkew * maxFundingVelocity
-   */
-  private async getCurrentVelocity(market: Market): Promise<string> {
-    const skew = subtract(market.longOpenInterest, market.shortOpenInterest);
-
-    const skewScale = add(market.longOpenInterest, market.shortOpenInterest);
-
-    const proportionalSkew = divide(skew, skewScale);
-
-    // Clamp proportionalSkew between -1 and 1
-    const pSkewBounded = clamp(proportionalSkew, -1, 1);
-
-    return multiply(pSkewBounded, market.maxFundingVelocity);
+    return await this.calculateFundingRate(market);
   }
 
   private async invalidateMarketCache(market?: Market): Promise<void> {
@@ -367,6 +358,137 @@ export class MarketService {
     await this.databaseService.update<Market>('markets', updateData, {
       id: marketId,
     });
+
+    await this.invalidateMarketCache();
+  }
+
+  /**
+   * Update virtual AMM state after a trade
+   * @param marketId Market ID
+   * @param side Order side
+   * @param size Position size in USD
+   */
+  async updateVirtualAMM(
+    marketId: string,
+    side: OrderSide,
+    size: string,
+  ): Promise<void> {
+    const market = await this.getMarketById(marketId);
+
+    // Calculate new reserves
+    const baseReserve = market.virtualBaseReserve;
+    const quoteReserve = market.virtualQuoteReserve;
+
+    let newBaseReserve: string;
+    let newQuoteReserve: string;
+
+    if (side === OrderSide.LONG) {
+      const baseOut = divide(multiply(size, baseReserve), quoteReserve);
+      newBaseReserve = subtract(baseReserve, baseOut);
+      newQuoteReserve = add(quoteReserve, size);
+    } else {
+      const quoteOut = size;
+      newQuoteReserve = subtract(quoteReserve, quoteOut);
+      newBaseReserve = add(
+        baseReserve,
+        divide(size, divide(quoteReserve, baseReserve)),
+      );
+    }
+
+    // Update market state
+    await this.databaseService.update<Market>(
+      'markets',
+      {
+        virtualBaseReserve: newBaseReserve,
+        virtualQuoteReserve: newQuoteReserve,
+      },
+      { id: marketId },
+    );
+
+    await this.invalidateMarketCache();
+  }
+
+  /**
+   * Calculate funding rate based on difference between virtual price and oracle price
+   * @audit Need new formula --> this doesn't work
+   * @param market Current market state
+   * @returns Updated funding rate
+   */
+  private async calculateFundingRate(market: Market): Promise<string> {
+    // Get latest oracle price
+    const [virtualPrice, oraclePrice] = await Promise.all([
+      this.priceService.getVirtualPrice(market.id),
+      this.priceService.getOraclePrice(market.id),
+    ]);
+
+    // Calculate price difference percentage
+    const priceDiff = divide(subtract(virtualPrice, oraclePrice), oraclePrice);
+
+    // Funding rate is proportional to price difference
+    // If virtual price > oracle price, longs pay shorts
+    // If virtual price < oracle price, shorts pay longs
+    const fundingRate = multiply(priceDiff, '0.01'); // 1% dampening factor
+
+    // Clamp funding rate to max
+    return clamp(
+      fundingRate,
+      multiply(market.maxFundingRate, '-1'),
+      market.maxFundingRate,
+    );
+  }
+
+  /**
+   * Update virtual AMM reserves after a trade
+   */
+  async updateVirtualReserves(
+    marketId: string,
+    side: OrderSide,
+    size: string,
+  ): Promise<void> {
+    const market = await this.getMarketById(marketId);
+    const baseReserve = market.virtualBaseReserve; // base-9
+    const quoteReserve = market.virtualQuoteReserve; // base-6
+
+    let newBaseReserve: string;
+    let newQuoteReserve: string;
+
+    if (side === OrderSide.LONG) {
+      // Convert USD size to USDC base-6 units, accounting for USDC price
+      const usdcPrice = await this.priceService.getUsdcPrice();
+      const sizeInBaseUnits = multiply(
+        divide(size, usdcPrice),
+        this.USDC_BASE_UNIT,
+      );
+
+      const baseOut = divide(
+        multiply(sizeInBaseUnits, baseReserve),
+        quoteReserve,
+      );
+      newBaseReserve = subtract(baseReserve, baseOut);
+      newQuoteReserve = add(quoteReserve, sizeInBaseUnits);
+    } else {
+      // For shorts: Convert USD size to base token units using token price
+      const tokenPrice = await this.priceService.getCurrentPrice(marketId);
+      const sizeInBaseUnits = multiply(
+        divide(size, tokenPrice),
+        this.SPL_BASE_UNIT,
+      ); // Convert to base-9
+
+      newBaseReserve = add(baseReserve, sizeInBaseUnits);
+      newQuoteReserve = divide(market.virtualK, newBaseReserve);
+    }
+
+    await this.databaseService.update<Market>(
+      'markets',
+      {
+        virtualBaseReserve: newBaseReserve,
+        virtualQuoteReserve: newQuoteReserve,
+      },
+      { id: marketId },
+    );
+
+    // Update virtual price in PriceService
+    await this.priceService.updateVirtualPrice(marketId, side, size);
 
     await this.invalidateMarketCache();
   }

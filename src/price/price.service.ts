@@ -9,8 +9,11 @@ import { Program, BN, AnchorProvider } from '@coral-xyz/anchor';
 import { VIRTUAL_XYK_IDL } from 'src/lib/idl/virtual_xyk';
 import { VirtualXyk } from 'src/lib/idl/virtual_xyk.types';
 import { CurveUtil } from 'src/lib/virtual-helpers';
-import { multiply } from 'src/lib/math';
+import { multiply, divide, add, subtract, clamp } from 'src/lib/math';
 import { getListedDaos, SOLANA_CONFIG } from 'src/common/config';
+import { OrderSide } from 'src/types/trade.types';
+import { Market } from 'src/entities/market.entity';
+
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
  * the Jupiter Swap API. Perhaps the QuickNode version if that enables us to get websocket connections.
@@ -25,6 +28,11 @@ export class PriceService {
   private usdcPrice: number;
   // SOL/USD price from Binance
   private solPrice: number;
+
+  // Store virtual AMM prices in memory
+  private virtualPrices: Map<string, string> = new Map();
+  // Store oracle prices in memory
+  private oraclePrices: Map<string, string> = new Map();
 
   // Rate limiter --> increase once updated to Metis v6 endpoint
   private solanaLimiter = new RateLimiter({
@@ -45,6 +53,11 @@ export class PriceService {
     new Map();
 
   private daoPrices: Map<string, number> = new Map(); // ticker -> price
+
+  // Base units for token math
+  private readonly SPL_BASE_UNIT = '1000000000'; // base-9
+  private readonly USDC_BASE_UNIT = '1000000'; // base-6
+  private readonly BASE_UNIT_DELTA = '1000'; // base-3 (9-6)
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
@@ -96,6 +109,161 @@ export class PriceService {
       throw new Error('Unable to fetch USDC price');
     }
     return this.usdcPrice;
+  }
+
+  /**
+   * Preview the execution price for a trade before it happens
+   * This calculates the price impact without updating any state
+   */
+  /**
+   * @audit Review
+   */
+  async previewPrice(
+    marketId: string,
+    side: OrderSide,
+    size: string,
+  ): Promise<{
+    executionPrice: string;
+    priceImpact: string;
+  }> {
+    const market = await this.marketService.getMarketById(marketId);
+    const baseReserve = market.virtualBaseReserve; // base-9
+    const quoteReserve = market.virtualQuoteReserve; // base-6
+    const currentPrice = await this.getVirtualPrice(marketId);
+
+    let executionPrice: string;
+    let newQuoteReserve: string;
+    let newBaseReserve: string;
+
+    if (side === OrderSide.LONG) {
+      // Convert USD size to USDC base-6 units
+      const usdcPrice = await this.getUsdcPrice();
+      const sizeInBaseUnits = multiply(
+        divide(size, usdcPrice),
+        this.USDC_BASE_UNIT,
+      );
+
+      // Calculate how many base tokens we get for our quote tokens
+      const baseOut = divide(
+        multiply(sizeInBaseUnits, baseReserve),
+        quoteReserve,
+      );
+
+      // Update reserves
+      newBaseReserve = subtract(baseReserve, baseOut);
+      newQuoteReserve = add(quoteReserve, sizeInBaseUnits);
+    } else {
+      // For shorts: Convert USD size to base token units
+      const tokenPrice = await this.getVirtualPrice(marketId);
+      const sizeInBaseUnits = multiply(
+        divide(size, tokenPrice),
+        this.SPL_BASE_UNIT,
+      );
+
+      // Update reserves
+      newBaseReserve = add(baseReserve, sizeInBaseUnits);
+      newQuoteReserve = divide(market.virtualK, newBaseReserve);
+    }
+
+    // Calculate execution price (need to adjust for base unit difference)
+    executionPrice = multiply(
+      divide(newQuoteReserve, newBaseReserve),
+      this.BASE_UNIT_DELTA,
+    );
+
+    // Calculate price impact as a percentage
+    const priceImpact = divide(
+      subtract(executionPrice, currentPrice),
+      currentPrice,
+    );
+
+    return {
+      executionPrice,
+      priceImpact,
+    };
+  }
+
+  /**
+   * Get the current virtual AMM price for a market
+   */
+  async getVirtualPrice(marketId: string): Promise<string> {
+    const virtualPrice = this.virtualPrices.get(marketId);
+    if (!virtualPrice) {
+      // If no virtual price exists, calculate it from market reserves
+      const market = await this.marketService.getMarketById(marketId);
+
+      // Convert reserves to same base units before division
+      // quoteReserve is base-6, baseReserve is base-9
+      const adjustedQuoteReserve = multiply(
+        market.virtualQuoteReserve,
+        this.BASE_UNIT_DELTA,
+      );
+      const price = divide(adjustedQuoteReserve, market.virtualBaseReserve);
+
+      this.virtualPrices.set(marketId, price);
+      return price;
+    }
+    return virtualPrice;
+  }
+
+  /**
+   * Update virtual price after a trade is executed
+   * This should only be called after the trade is confirmed
+   */
+  async updateVirtualPrice(
+    marketId: string,
+    side: OrderSide,
+    size: string,
+  ): Promise<void> {
+    const { executionPrice } = await this.previewPrice(marketId, side, size);
+    this.virtualPrices.set(marketId, executionPrice);
+  }
+
+  /**
+   * Get the current oracle price for a market
+   */
+  async getOraclePrice(marketId: string): Promise<string> {
+    const oraclePrice = this.oraclePrices.get(marketId);
+    if (!oraclePrice) {
+      // If no oracle price exists, fetch it from the DAO
+      const market = await this.marketService.getMarketById(marketId);
+      const price = await this.getDaoPrice(new PublicKey(market.poolAddress));
+      this.oraclePrices.set(marketId, price);
+      return price;
+    }
+    return oraclePrice;
+  }
+
+  /**
+   * Calculate the virtual AMM price after a trade
+   * @param market Current market state
+   * @param side Order side (LONG/SHORT)
+   * @param size Position size in USD
+   * @returns New price after the trade
+   */
+  async calculateVirtualPrice(
+    market: Market,
+    side: OrderSide,
+    size: string,
+  ): Promise<string> {
+    const baseReserve = market.virtualBaseReserve;
+    const quoteReserve = market.virtualQuoteReserve;
+
+    // For longs: trader buys base token with quote token
+    // For shorts: trader sells base token for quote token
+    if (side === OrderSide.LONG) {
+      // dx = size / P = size / (y/x) = (size * x) / y
+      const baseOut = divide(multiply(size, baseReserve), quoteReserve);
+      const newBaseReserve = subtract(baseReserve, baseOut);
+      const newQuoteReserve = divide(market.virtualK, newBaseReserve);
+      return divide(newQuoteReserve.toString(), newBaseReserve);
+    } else {
+      // dy = size
+      const quoteOut = size;
+      const newQuoteReserve = subtract(quoteReserve, quoteOut);
+      const newBaseReserve = divide(market.virtualK, newQuoteReserve);
+      return divide(newQuoteReserve, newBaseReserve);
+    }
   }
 
   /**
