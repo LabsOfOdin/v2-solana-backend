@@ -8,7 +8,7 @@ import { TokenType } from 'src/types/token.types';
 import { MarginService } from '../margin/margin.service';
 import { MarketService } from '../market/market.service';
 import { EventsService } from '../events/events.service';
-import { add, divide, multiply, subtract } from 'src/lib/math';
+import { add, divide, multiply, subtract, compare } from 'src/lib/math';
 import { calculatePnlUSD } from 'src/lib/calculatePnlUsd';
 import { SECONDS_IN_DAY } from 'src/common/config';
 
@@ -66,23 +66,21 @@ export class LiquidationService {
     const pnl = calculatePnlUSD(position, currentPrice);
 
     const collateralValue = add(
-      multiply(position.lockedMarginSOL, solPrice),
-      position.lockedMarginUSDC,
+      multiply(position.lockedMarginSOL || '0', solPrice.toString()),
+      position.lockedMarginUSDC || '0',
     );
 
-    const minCollateralValue = multiply(
+    // Calculate the minimum collateral required (maintenance margin)
+    const maintenanceMargin = multiply(
       collateralValue,
       this.maintenanceMarginRate,
     );
 
-    if (parseFloat(pnl) < 0) {
-      // If the total losses exceed the collateral value, liquidate
-      if (Math.abs(parseFloat(pnl)) > parseFloat(minCollateralValue)) {
-        return true;
-      }
-    }
+    // Calculate remaining collateral after PnL
+    const remainingCollateral = add(collateralValue, pnl);
 
-    return false;
+    // Liquidate if remaining collateral is less than maintenance margin
+    return compare(remainingCollateral, maintenanceMargin) < 0;
   }
 
   private async calculateLiquidationPrice(position: Position): Promise<string> {
@@ -314,96 +312,91 @@ export class LiquidationService {
     position: Position,
     now: Date,
   ): Promise<void> {
-    if (!position.lastBorrowingFeeUpdate) {
-      try {
-        if (!position.lastBorrowingFeeUpdate) {
-          position.lastBorrowingFeeUpdate = position.createdAt;
-        }
-
-        // Calculate seconds since last update
-        const secondsSinceLastUpdate =
-          (now.getTime() -
-            new Date(position.lastBorrowingFeeUpdate).getTime()) /
-          1000;
-
-        // Only proceed if at least 1 second has passed
-        if (secondsSinceLastUpdate >= 1) {
-          const [market] = await this.databaseService.select<Market>(
-            'markets',
-            {
-              eq: { id: position.marketId },
-              limit: 1,
-            },
-          );
-
-          if (!market) {
-            throw new Error('Market not found');
-          }
-
-          const positionValue = position.size;
-
-          // Calculate the portion of daily rate to charge
-          // market.borrowingRate is daily rate, so divide by seconds in a day
-          const borrowingFeeUsd = multiply(
-            positionValue,
-            multiply(
-              market.borrowingRate,
-              divide(secondsSinceLastUpdate.toString(), SECONDS_IN_DAY),
-            ),
-          );
-
-          // Get token price for conversion
-          const tokenPrice =
-            position.token === TokenType.SOL
-              ? await this.priceService.getSolPrice()
-              : await this.priceService.getUsdcPrice();
-
-          // Convert fee to token amount
-          const feeInToken = divide(borrowingFeeUsd, tokenPrice);
-
-          // Deduct fee from user's margin balance
-          await this.marginService.reduceLockedMargin(
-            position.userId,
-            position.token,
-            feeInToken,
-          );
-
-          // Add fee to market's tracking
-          await this.marketService.addTradingFees(
-            market.id,
-            feeInToken,
-            position.token,
-          );
-
-          // Update with exact timestamp
-          await this.databaseService.update<Position>(
-            'positions',
-            {
-              accumulatedBorrowingFee: add(
-                position.accumulatedBorrowingFee,
-                feeInToken,
-              ),
-              lastBorrowingFeeUpdate: now, // Use current timestamp
-            },
-            { id: position.id },
-          );
-
-          // Emit fee charged event
-          this.eventsService.emitBorrowingFeeCharged({
-            userId: position.userId,
-            positionId: position.id,
-            marketId: market.id,
-            feeUsd: feeInToken,
-            feeToken: feeInToken,
-            token: position.token,
-          });
-        }
-      } catch (error) {
-        this.logger.error(
-          `Error updating borrowing fees for position ${position.id}:`,
-          error,
-        );
+    try {
+      if (!position.lastBorrowingFeeUpdate) {
+        position.lastBorrowingFeeUpdate = position.createdAt;
       }
+
+      // Calculate seconds since last update
+      const secondsSinceLastUpdate =
+        (now.getTime() - new Date(position.lastBorrowingFeeUpdate).getTime()) /
+        1000;
+
+      // Only proceed if at least 1 second has passed
+      if (secondsSinceLastUpdate >= 1) {
+        const [market] = await this.databaseService.select<Market>('markets', {
+          eq: { id: position.marketId },
+          limit: 1,
+        });
+
+        if (!market) {
+          throw new Error('Market not found');
+        }
+
+        const positionValue = position.size || '0';
+
+        // Calculate the portion of daily rate to charge
+        // market.borrowingRate is daily rate, so divide by seconds in a day
+        const borrowingFeeUsd = multiply(
+          positionValue,
+          multiply(
+            market.borrowingRate || '0',
+            divide(secondsSinceLastUpdate.toString(), SECONDS_IN_DAY),
+          ),
+        );
+
+        // Get token price for conversion
+        const tokenPrice =
+          position.token === TokenType.SOL
+            ? await this.priceService.getSolPrice()
+            : await this.priceService.getUsdcPrice();
+
+        // Convert fee to token amount
+        const feeInToken = divide(borrowingFeeUsd || '0', tokenPrice || '1');
+
+        // Deduct fee from user's margin balance
+        await this.marginService.reduceLockedMargin(
+          position.userId,
+          position.token,
+          feeInToken,
+        );
+
+        // Add fee to market's tracking
+        await this.marketService.addTradingFees(
+          market.id,
+          feeInToken,
+          position.token,
+        );
+
+        // Update with exact timestamp
+        await this.databaseService.update<Position>(
+          'positions',
+          {
+            accumulatedBorrowingFee: add(
+              position.accumulatedBorrowingFee || '0',
+              feeInToken,
+            ),
+            lastBorrowingFeeUpdate: now, // Use current timestamp
+          },
+          { id: position.id },
+        );
+
+        // Emit fee charged event
+        this.eventsService.emitBorrowingFeeCharged({
+          userId: position.userId,
+          positionId: position.id,
+          marketId: market.id,
+          feeUsd: borrowingFeeUsd,
+          feeToken: feeInToken,
+          token: position.token,
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error updating borrowing fees for position ${position.id}:`,
+        error,
+      );
+      throw error;
     }
   }
 }

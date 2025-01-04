@@ -217,14 +217,19 @@ export class TradeService {
       // PART 2: Calculations and Price Checks
       // -------------------------------------
 
-      // 4. Fetch current market price and calculate entry price
-      const marketPrice = await this.priceService.getCurrentPrice(
-        orderRequest.marketId,
-      );
-      const { entryPrice, updatedImpactPool } = await this.calculateEntryPrice(
-        marketPrice,
-        orderRequest,
-      );
+      // 4. Calculate entry price using virtual AMM and check slippage
+      const { executionPrice, priceImpact } =
+        await this.priceService.previewPrice(
+          market.id,
+          orderRequest.side,
+          orderRequest.size,
+        );
+
+      // Check if slippage is within acceptable bounds
+      const slippagePercentage = abs(priceImpact);
+      if (compare(slippagePercentage, orderRequest.maxSlippage) > 0) {
+        throw new BadRequestException('Slippage exceeds maximum allowed');
+      }
 
       // 5. Calculate required margin and validate user's balance
       const requiredMarginUSD =
@@ -285,9 +290,14 @@ export class TradeService {
         positionId,
       );
 
-      // 4. Update market's impact pool
+      // 4. Update virtual AMM state and market's open interest
+      await this.marketService.updateVirtualReserves(
+        market.id,
+        orderRequest.side,
+        orderRequest.size,
+      );
+
       await this.marketService.updateMarket(market.id, {
-        impactPool: updatedImpactPool,
         longOpenInterest:
           orderRequest.side === OrderSide.LONG
             ? add(market.longOpenInterest, orderRequest.size)
@@ -306,7 +316,7 @@ export class TradeService {
         symbol: market.symbol,
         side: orderRequest.side,
         size: orderRequest.size,
-        entryPrice,
+        entryPrice: executionPrice,
         leverage: orderRequest.leverage,
         stopLossPrice: orderRequest.stopLossPrice,
         takeProfitPrice: orderRequest.takeProfitPrice,
@@ -321,7 +331,6 @@ export class TradeService {
       // -------------------------------------
 
       // Emit position update event (non-critical)
-
       this.eventsService.emitPositionsUpdate(orderRequest.userId);
 
       return position.status === PositionStatus.OPEN;
@@ -922,169 +931,6 @@ export class TradeService {
   // 3) Helper Functions
   // ----------------------------------------------------------------
 
-  private async calculateEntryPrice(
-    marketPrice: string,
-    order: OrderRequest,
-  ): Promise<{
-    entryPrice: string;
-    updatedImpactPool: string;
-  }> {
-    try {
-      if (!marketPrice || !order) {
-        throw new BadRequestException(
-          'Market price and order details are required',
-        );
-      }
-
-      // Get market details
-      const market = await this.marketService.getMarketById(order.marketId);
-
-      if (!market) {
-        throw new NotFoundException('Market not found');
-      }
-
-      // Calculate price impact
-      const priceImpact = await this.calculatePriceImpact(order, market);
-
-      const positivelyImpacted = compare(priceImpact, '0') > 0;
-
-      // Calculate slippage
-      const slippagePercentage = this.calculateSlippage(
-        order.size,
-        priceImpact,
-        positivelyImpacted,
-      );
-
-      if (compare(slippagePercentage, order.maxSlippage) > 0) {
-        throw new BadRequestException('Slippage exceeds max slippage');
-      }
-
-      // Calculate final capped impact
-      const cappedImpact = positivelyImpacted
-        ? compare(priceImpact, market.impactPool) > 0
-          ? market.impactPool
-          : priceImpact
-        : priceImpact;
-
-      // Calculate impact pool changes
-      let updatedImpactPool = market.impactPool;
-      if (compare(priceImpact, '0') < 0) {
-        // Negative impact increases the pool by the absolute value
-        updatedImpactPool = add(
-          market.impactPool,
-          multiply(cappedImpact, '-1'),
-        );
-      } else {
-        // Positive impact decreases the pool, but cannot go below 0
-        updatedImpactPool = subtract(market.impactPool, cappedImpact);
-      }
-
-      // Calculate final entry price
-      const entryPrice = await this.applyPriceImpact(
-        marketPrice,
-        cappedImpact,
-        order,
-      );
-
-      return { entryPrice, updatedImpactPool };
-    } catch (error) {
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to calculate entry price');
-    }
-  }
-
-  /**
-   * @formula priceImpact = size usd * skew factor * liquidity factor
-   * where skew factor = (init skew / init total OI) - (updated skew / updated total OI)
-   * and liquidity factor = scalar * (size usd  / available OI)
-   */
-  private async calculatePriceImpact(
-    order: OrderRequest,
-    market: Market,
-  ): Promise<string> {
-    const initSkew =
-      Number(market.longOpenInterest) - Number(market.shortOpenInterest);
-
-    const initOi =
-      Number(market.longOpenInterest) + Number(market.shortOpenInterest);
-
-    // If there's no initial open interest, only use the new order's impact
-    if (initOi === 0) {
-      const updatedSkew =
-        order.side === OrderSide.LONG
-          ? Number(order.size)
-          : -Number(order.size);
-
-      const updatedOi = Number(order.size);
-
-      // Just use the new skew ratio since there's no previous state to compare against
-      const skewFactor = divide(
-        abs(updatedSkew.toString()),
-        updatedOi.toString(),
-      );
-
-      const liquidityFactor = divide(order.size, market.availableLiquidity);
-
-      return multiply(order.size, skewFactor, liquidityFactor);
-    }
-
-    // Short form of doing (x + k) - y || x - (y + k)
-    const updatedSkew =
-      order.side === OrderSide.LONG
-        ? initSkew + Number(order.size)
-        : initSkew - Number(order.size);
-
-    const updatedOi = initOi + Number(order.size);
-
-    const skewFactor = subtract(
-      divide(initSkew.toString(), initOi.toString()),
-      divide(updatedSkew.toString(), updatedOi.toString()),
-    );
-
-    if (parseFloat(skewFactor) > 1) {
-      throw new Error('Skew factor is greater than 1');
-    }
-
-    const liquidityFactor = divide(order.size, market.availableLiquidity);
-
-    if (parseFloat(liquidityFactor) > 1) {
-      throw new Error('Liquidity factor is greater than 1');
-    }
-
-    return multiply(order.size, skewFactor, liquidityFactor);
-  }
-
-  /**
-   * @dev Returns the impacted price based on the price impact and order side
-   */
-  private async applyPriceImpact(
-    marketPrice: string,
-    priceImpact: string,
-    order: OrderRequest,
-  ): Promise<string> {
-    const impactPercentage = divide(priceImpact, order.size);
-
-    if (order.side === OrderSide.LONG) {
-      if (parseFloat(priceImpact) > 0) {
-        // if price impact is > 0 and it's long, decrease the price by impact percentage
-        return multiply(marketPrice, subtract('1', impactPercentage));
-      } else {
-        // if price impact is < 0 and it's long, increase the price by impact percentage
-        return multiply(marketPrice, add('1', impactPercentage));
-      }
-    } else {
-      if (parseFloat(priceImpact) > 0) {
-        // if price impact is > 0 and it's short, increase the price by impact percentage
-        return multiply(marketPrice, add('1', impactPercentage));
-      } else {
-        // if price impact is < 0 and it's short, decrease the price by impact percentage
-        return multiply(marketPrice, subtract('1', impactPercentage));
-      }
-    }
-  }
-
   // E.g $5 size, 2x leverage = $2.5 margin
   private async calculateRequiredMargin(order: OrderRequest): Promise<string> {
     try {
@@ -1109,6 +955,9 @@ export class TradeService {
     }
   }
 
+  /**
+   * @audit Update for vAMM
+   */
   private calculateSlippage(
     size: string,
     priceImpact: string,

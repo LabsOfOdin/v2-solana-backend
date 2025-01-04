@@ -10,7 +10,6 @@ import { PriceModule } from './price/price.module';
 import { TradeModule } from './trade/trade.module';
 import { MarginModule } from './margin/margin.module';
 import { EventsModule } from './events/events.module';
-import { LiquidityModule } from './liquidity/liquidity.module';
 import { LimitOrderModule } from './limit-order/limit-order.module';
 import { LiquidationModule } from './liquidation/liquidation.module';
 import { StatsModule } from './stats/stats.module';
@@ -32,7 +31,6 @@ import { StatsModule } from './stats/stats.module';
     TradeModule,
     MarginModule,
     EventsModule,
-    LiquidityModule,
     LimitOrderModule,
     LiquidationModule,
     StatsModule,
