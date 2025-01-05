@@ -13,6 +13,11 @@ import { multiply, divide, add, subtract, clamp } from 'src/lib/math';
 import { getListedDaos, SOLANA_CONFIG } from 'src/common/config';
 import { OrderSide } from 'src/types/trade.types';
 import { Market } from 'src/entities/market.entity';
+import {
+  BASE_UNIT_DELTA,
+  SPL_BASE_UNIT,
+  USDC_BASE_UNIT,
+} from 'src/common/constants';
 
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
@@ -54,10 +59,10 @@ export class PriceService {
 
   private daoPrices: Map<string, number> = new Map(); // ticker -> price
 
-  // Base units for token math
-  private readonly SPL_BASE_UNIT = '1000000000'; // base-9
-  private readonly USDC_BASE_UNIT = '1000000'; // base-6
-  private readonly BASE_UNIT_DELTA = '1000'; // base-3 (9-6)
+  private marketReserves: Map<
+    string,
+    { baseReserve: string; quoteReserve: string }
+  > = new Map();
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
@@ -115,60 +120,49 @@ export class PriceService {
    * Preview the execution price for a trade before it happens
    * This calculates the price impact without updating any state
    */
-  /**
-   * @audit Review
-   */
   async previewPrice(
     marketId: string,
     side: OrderSide,
     size: string,
+    isClosing: boolean = false,
   ): Promise<{
     executionPrice: string;
     priceImpact: string;
   }> {
     const market = await this.marketService.getMarketById(marketId);
     const baseReserve = market.virtualBaseReserve; // base-9
-    const quoteReserve = market.virtualQuoteReserve; // base-6
     const currentPrice = await this.getVirtualPrice(marketId);
 
-    let executionPrice: string;
-    let newQuoteReserve: string;
+    // Convert USD size to base token units (same as in updateVirtualReserves)
+    const sizeInTokens = Math.round(
+      parseFloat(multiply(divide(size, currentPrice), SPL_BASE_UNIT)),
+    ).toString();
+
+    // Calculate new base reserve based on order side and whether it's closing
     let newBaseReserve: string;
-
     if (side === OrderSide.LONG) {
-      // Convert USD size to USDC base-6 units
-      const usdcPrice = await this.getUsdcPrice();
-      const sizeInBaseUnits = multiply(
-        divide(size, usdcPrice),
-        this.USDC_BASE_UNIT,
-      );
-
-      // Calculate how many base tokens we get for our quote tokens
-      const baseOut = divide(
-        multiply(sizeInBaseUnits, baseReserve),
-        quoteReserve,
-      );
-
-      // Update reserves
-      newBaseReserve = subtract(baseReserve, baseOut);
-      newQuoteReserve = add(quoteReserve, sizeInBaseUnits);
+      if (isClosing) {
+        // Decrease the base reserve by the size in tokens
+        newBaseReserve = subtract(baseReserve, sizeInTokens);
+      } else {
+        // Increase the base reserve by the size in tokens
+        newBaseReserve = add(baseReserve, sizeInTokens);
+      }
     } else {
-      // For shorts: Convert USD size to base token units
-      const tokenPrice = await this.getVirtualPrice(marketId);
-      const sizeInBaseUnits = multiply(
-        divide(size, tokenPrice),
-        this.SPL_BASE_UNIT,
-      );
-
-      // Update reserves
-      newBaseReserve = add(baseReserve, sizeInBaseUnits);
-      newQuoteReserve = divide(market.virtualK, newBaseReserve);
+      // Shorts are selling, so closing increases the base reserve
+      if (isClosing) {
+        // Increase the base reserve by the size in tokens
+        newBaseReserve = add(baseReserve, sizeInTokens);
+      } else {
+        // Decrease the base reserve by the size in tokens
+        newBaseReserve = subtract(baseReserve, sizeInTokens);
+      }
     }
 
-    // Calculate execution price (need to adjust for base unit difference)
-    executionPrice = multiply(
-      divide(newQuoteReserve, newBaseReserve),
-      this.BASE_UNIT_DELTA,
+    // Calculate new price based on reserve changes
+    const executionPrice = multiply(
+      divide(market.virtualQuoteReserve, newBaseReserve),
+      BASE_UNIT_DELTA,
     );
 
     // Calculate price impact as a percentage
@@ -188,35 +182,34 @@ export class PriceService {
    */
   async getVirtualPrice(marketId: string): Promise<string> {
     const virtualPrice = this.virtualPrices.get(marketId);
-    if (!virtualPrice) {
-      // If no virtual price exists, calculate it from market reserves
-      const market = await this.marketService.getMarketById(marketId);
+    const market = await this.marketService.getMarketById(marketId);
 
-      // Convert reserves to same base units before division
-      // quoteReserve is base-6, baseReserve is base-9
+    // Check if reserves have changed
+    const cachedReserves = this.marketReserves.get(marketId);
+    const reservesChanged =
+      !cachedReserves ||
+      cachedReserves.baseReserve !== market.virtualBaseReserve ||
+      cachedReserves.quoteReserve !== market.virtualQuoteReserve;
+
+    if (!virtualPrice || reservesChanged) {
+      // Calculate new price from market reserves
       const adjustedQuoteReserve = multiply(
         market.virtualQuoteReserve,
-        this.BASE_UNIT_DELTA,
+        BASE_UNIT_DELTA,
       );
       const price = divide(adjustedQuoteReserve, market.virtualBaseReserve);
 
+      // Update cache
       this.virtualPrices.set(marketId, price);
+      this.marketReserves.set(marketId, {
+        baseReserve: market.virtualBaseReserve,
+        quoteReserve: market.virtualQuoteReserve,
+      });
+
       return price;
     }
-    return virtualPrice;
-  }
 
-  /**
-   * Update virtual price after a trade is executed
-   * This should only be called after the trade is confirmed
-   */
-  async updateVirtualPrice(
-    marketId: string,
-    side: OrderSide,
-    size: string,
-  ): Promise<void> {
-    const { executionPrice } = await this.previewPrice(marketId, side, size);
-    this.virtualPrices.set(marketId, executionPrice);
+    return virtualPrice;
   }
 
   /**

@@ -387,13 +387,16 @@ export class TradeService {
       // -------------------------------------
 
       // 5. Calculate all necessary values
-      const currentPrice = await this.priceService.getCurrentPrice(
+      // @audit add max slippage
+      const { executionPrice } = await this.priceService.previewPrice(
         position.marketId,
+        position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
+        sizeDelta,
       );
 
       const remainingSize = subtract(position.size, sizeDelta);
 
-      const realizedPnlUSD = calculatePnlUSD(position, currentPrice);
+      const realizedPnlUSD = calculatePnlUSD(position, executionPrice);
 
       const solPrice = await this.priceService.getSolPrice();
 
@@ -432,7 +435,7 @@ export class TradeService {
         side:
           position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
         size: sizeDelta,
-        price: currentPrice,
+        price: executionPrice,
         leverage: position.leverage,
         realizedPnl: realizedPnlUSD,
         fee: this.calculateFee(
@@ -520,7 +523,7 @@ export class TradeService {
               ...position,
               status: PositionStatus.CLOSED,
               closedAt: new Date(),
-              closingPrice: currentPrice,
+              closingPrice: executionPrice,
               realizedPnl: realizedPnlUSD,
             }
           : {
@@ -552,6 +555,14 @@ export class TradeService {
             ? subtract(market.shortOpenInterest, sizeDelta)
             : market.shortOpenInterest,
       });
+
+      // Update virtual AMM reserves
+      await this.marketService.updateVirtualReserves(
+        market.id,
+        position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
+        sizeDelta,
+        true,
+      );
 
       // 3. Record the trade
       await this.recordTrade(tradeRecord);

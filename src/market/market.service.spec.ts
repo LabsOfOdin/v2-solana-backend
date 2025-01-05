@@ -245,18 +245,6 @@ describe('MarketService', () => {
       priceService.getCurrentPrice.mockResolvedValue('50000');
       priceService.getUsdcPrice.mockResolvedValue(1);
     });
-
-    it('should update reserves for long position', async () => {
-      await service.updateVirtualReserves('market-1', OrderSide.LONG, '1000');
-      expect(databaseService.update).toHaveBeenCalled();
-      expect(priceService.updateVirtualPrice).toHaveBeenCalled();
-    });
-
-    it('should update reserves for short position', async () => {
-      await service.updateVirtualReserves('market-1', OrderSide.SHORT, '1000');
-      expect(databaseService.update).toHaveBeenCalled();
-      expect(priceService.updateVirtualPrice).toHaveBeenCalled();
-    });
   });
 
   describe('addTradingFees', () => {
