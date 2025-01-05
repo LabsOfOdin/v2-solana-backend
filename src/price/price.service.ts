@@ -1,9 +1,14 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Inject, Injectable, forwardRef } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
 import { RateLimiter } from 'limiter';
 import { Cache } from 'cache-manager';
 import * as WebSocket from 'ws';
-import { MarketService } from 'src/market/market.service';
+import { DatabaseService } from 'src/database/database.service';
 import { Connection, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
 import { Program, BN, AnchorProvider } from '@coral-xyz/anchor';
 import { VIRTUAL_XYK_IDL } from 'src/lib/idl/virtual_xyk';
@@ -15,6 +20,7 @@ import { OrderSide } from 'src/types/trade.types';
 import { Market } from 'src/entities/market.entity';
 import {
   BASE_UNIT_DELTA,
+  INITIAL_RESERVE_BALANCE,
   SPL_BASE_UNIT,
   USDC_BASE_UNIT,
 } from 'src/common/constants';
@@ -50,13 +56,6 @@ export class PriceService {
     interval: 'minute',
   });
 
-  // Store up to 5 minutes of data, or choose a suitable time period
-  private readonly TWAP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-
-  // Map each token address to an array of { timestamp, price }
-  private priceHistory: Map<string, { timestamp: number; price: number }[]> =
-    new Map();
-
   private daoPrices: Map<string, number> = new Map(); // ticker -> price
 
   private marketReserves: Map<
@@ -66,8 +65,7 @@ export class PriceService {
 
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
-    @Inject(forwardRef(() => MarketService))
-    private readonly marketService: MarketService,
+    private readonly databaseService: DatabaseService,
   ) {
     // Initialize WebSocket connections
     this.connectBinanceWebSocket();
@@ -81,7 +79,7 @@ export class PriceService {
    */
 
   async getCurrentPrice(marketId: string): Promise<string> {
-    const market = await this.marketService.getMarketById(marketId);
+    const market = await this.getMarketById(marketId);
 
     const price = this.daoPrices.get(market.symbol.toUpperCase());
 
@@ -89,11 +87,42 @@ export class PriceService {
       throw new Error(`Price not found for ${market.symbol}`);
     }
 
-    this.updatePriceHistory(market.tokenAddress, price);
+    return price.toString();
+  }
 
-    const twap = this.computeTwap(market.tokenAddress, price);
+  /**
+   * Get the current virtual AMM price for a market
+   */
+  async getVirtualPrice(marketId: string): Promise<string> {
+    const virtualPrice = this.virtualPrices.get(marketId);
+    const market = await this.getMarketById(marketId);
 
-    return twap.toString();
+    // Check if reserves have changed
+    const cachedReserves = this.marketReserves.get(marketId);
+    const reservesChanged =
+      !cachedReserves ||
+      cachedReserves.baseReserve !== market.virtualBaseReserve ||
+      cachedReserves.quoteReserve !== market.virtualQuoteReserve;
+
+    if (!virtualPrice || reservesChanged) {
+      // Calculate new price from market reserves
+      const adjustedQuoteReserve = multiply(
+        market.virtualQuoteReserve,
+        BASE_UNIT_DELTA,
+      );
+      const price = divide(adjustedQuoteReserve, market.virtualBaseReserve);
+
+      // Update cache
+      this.virtualPrices.set(marketId, price);
+      this.marketReserves.set(marketId, {
+        baseReserve: market.virtualBaseReserve,
+        quoteReserve: market.virtualQuoteReserve,
+      });
+
+      return price;
+    }
+
+    return virtualPrice;
   }
 
   async getSolPrice(): Promise<number> {
@@ -129,7 +158,7 @@ export class PriceService {
     executionPrice: string;
     priceImpact: string;
   }> {
-    const market = await this.marketService.getMarketById(marketId);
+    const market = await this.getMarketById(marketId);
     const baseReserve = market.virtualBaseReserve; // base-9
     const currentPrice = await this.getVirtualPrice(marketId);
 
@@ -175,56 +204,6 @@ export class PriceService {
       executionPrice,
       priceImpact,
     };
-  }
-
-  /**
-   * Get the current virtual AMM price for a market
-   */
-  async getVirtualPrice(marketId: string): Promise<string> {
-    const virtualPrice = this.virtualPrices.get(marketId);
-    const market = await this.marketService.getMarketById(marketId);
-
-    // Check if reserves have changed
-    const cachedReserves = this.marketReserves.get(marketId);
-    const reservesChanged =
-      !cachedReserves ||
-      cachedReserves.baseReserve !== market.virtualBaseReserve ||
-      cachedReserves.quoteReserve !== market.virtualQuoteReserve;
-
-    if (!virtualPrice || reservesChanged) {
-      // Calculate new price from market reserves
-      const adjustedQuoteReserve = multiply(
-        market.virtualQuoteReserve,
-        BASE_UNIT_DELTA,
-      );
-      const price = divide(adjustedQuoteReserve, market.virtualBaseReserve);
-
-      // Update cache
-      this.virtualPrices.set(marketId, price);
-      this.marketReserves.set(marketId, {
-        baseReserve: market.virtualBaseReserve,
-        quoteReserve: market.virtualQuoteReserve,
-      });
-
-      return price;
-    }
-
-    return virtualPrice;
-  }
-
-  /**
-   * Get the current oracle price for a market
-   */
-  async getOraclePrice(marketId: string): Promise<string> {
-    const oraclePrice = this.oraclePrices.get(marketId);
-    if (!oraclePrice) {
-      // If no oracle price exists, fetch it from the DAO
-      const market = await this.marketService.getMarketById(marketId);
-      const price = await this.getDaoPrice(new PublicKey(market.poolAddress));
-      this.oraclePrices.set(marketId, price);
-      return price;
-    }
-    return oraclePrice;
   }
 
   /**
@@ -613,84 +592,6 @@ export class PriceService {
    * ========================== Helper Functions ==========================
    */
 
-  private updatePriceHistory(tokenAddress: string, price: number): void {
-    const now = Date.now();
-    const history = this.priceHistory.get(tokenAddress) || [];
-
-    // Add the new data point
-    history.push({ timestamp: now, price });
-
-    // Remove old entries beyond TWAP_WINDOW_MS
-    const cutoff = now - this.TWAP_WINDOW_MS;
-    while (history.length && history[0].timestamp < cutoff) {
-      history.shift();
-    }
-
-    // Save updated history
-    this.priceHistory.set(tokenAddress, history);
-  }
-
-  private computeTwap(tokenAddress: string, fallbackPrice: number): number {
-    const history = this.priceHistory.get(tokenAddress) || [];
-    // If no history, return the freshly fetched 'fallbackPrice'
-    if (!history.length) {
-      return fallbackPrice;
-    }
-
-    this.filterOutliers(history);
-
-    let totalWeightedPrice = 0;
-    let totalDuration = 0;
-
-    for (let i = 0; i < history.length - 1; i++) {
-      const current = history[i];
-      const next = history[i + 1];
-      // How long 'current.price' was valid until the next timestamp
-      const durationMs = next.timestamp - current.timestamp;
-      totalWeightedPrice += current.price * durationMs;
-      totalDuration += durationMs;
-    }
-
-    // Weight the final data point from its timestamp to "now"
-    const lastEntry = history[history.length - 1];
-    const now = Date.now();
-    const lastDurationMs = now - lastEntry.timestamp;
-    totalWeightedPrice += lastEntry.price * lastDurationMs;
-    totalDuration += lastDurationMs;
-
-    // If totalDuration is 0 for some reason (e.g. only one sample with identical timestamps), fallback
-    if (totalDuration === 0) {
-      return fallbackPrice;
-    }
-
-    return totalWeightedPrice / totalDuration;
-  }
-
-  private filterOutliers(
-    history: { timestamp: number; price: number }[],
-  ): void {
-    // Calculate simple mean
-    const sum = history.reduce((acc, h) => acc + h.price, 0);
-    const mean = sum / history.length;
-
-    // Calculate sample standard deviation
-    const variance =
-      history.reduce((acc, h) => acc + Math.pow(h.price - mean, 2), 0) /
-      history.length;
-    const stdDev = Math.sqrt(variance);
-
-    // Define an outlier threshold (e.g., 3 standard deviations)
-    const lowerBound = mean - 3 * stdDev;
-    const upperBound = mean + 3 * stdDev;
-
-    // Filter in-place (remove outliers outside the bounds)
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i].price < lowerBound || history[i].price > upperBound) {
-        history.splice(i, 1);
-      }
-    }
-  }
-
   private getErrorMessage(error: unknown): string {
     if (error instanceof Error) {
       return error.message;
@@ -729,5 +630,78 @@ export class PriceService {
       throw new Error(`Price not found for ${ticker}`);
     }
     return price;
+  }
+
+  /**
+   * @dev No caching here --> always fetch fresh virtual AMM values.
+   * @dev Duplicate to prevent circular dependency.
+   */
+  async getMarketById(marketId: string): Promise<Market> {
+    let [market] = await this.databaseService.select<Market>('markets', {
+      eq: { id: marketId },
+      limit: 1,
+    });
+
+    if (!market) {
+      throw new NotFoundException(`Market ${marketId} not found`);
+    }
+
+    console.log('Base reserve: ', market.virtualBaseReserve);
+    console.log('Quote reserve: ', market.virtualQuoteReserve);
+    console.log('K: ', market.virtualK);
+
+    // Initialize virtual AMM values if they are null
+    if (
+      !market.virtualBaseReserve ||
+      !market.virtualQuoteReserve ||
+      !market.virtualK
+    ) {
+      console.log(
+        'Initializing virtual AMM values for market (in price service)',
+        marketId,
+      );
+      // Initialize virtual AMM values and update market variable
+      market = await this.initializeVirtualAMM(market);
+    }
+
+    return market;
+  }
+
+  private async initializeVirtualAMM(market: Market): Promise<Market> {
+    // Get initial oracle price
+    const initialPrice = this.daoPrices.get(market.symbol.toUpperCase());
+
+    // Calculate $1M in the market's token
+    const baseReserve = Math.round(
+      Number(
+        multiply(divide(INITIAL_RESERVE_BALANCE, initialPrice), SPL_BASE_UNIT),
+      ),
+    ).toString();
+
+    // Calculate $1M in USDC (1,000,000 * 1e6)
+    const quoteReserve = multiply(INITIAL_RESERVE_BALANCE, USDC_BASE_UNIT);
+
+    // Calculate K
+    const k = multiply(baseReserve, quoteReserve);
+
+    console.log('Initializing amm with ', baseReserve, quoteReserve, k);
+
+    // Update the market with initial virtual AMM values
+    try {
+      const [updatedMarket] = await this.databaseService.update<Market>(
+        'markets',
+        {
+          virtualBaseReserve: baseReserve,
+          virtualQuoteReserve: quoteReserve,
+          virtualK: k,
+        },
+        { id: market.id },
+      );
+
+      return updatedMarket;
+    } catch (error) {
+      console.error('Error updating market:', this.getErrorMessage(error));
+      throw error;
+    }
   }
 }

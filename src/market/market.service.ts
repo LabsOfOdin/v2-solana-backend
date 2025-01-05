@@ -21,14 +21,14 @@ import { add, clamp, divide, multiply, subtract } from 'src/lib/math';
 import { TokenType } from 'src/types/token.types';
 import { SECONDS_IN_DAY } from 'src/common/config';
 import { OrderSide } from 'src/types/trade.types';
-import { SPL_BASE_UNIT } from 'src/common/constants';
+import {
+  INITIAL_RESERVE_BALANCE,
+  SPL_BASE_UNIT,
+  USDC_BASE_UNIT,
+} from 'src/common/constants';
 
 @Injectable()
 export class MarketService {
-  // Initial virtual AMM reserves and k value
-  private readonly INITIAL_RESERVE_BALANCE = 1_000_000; // $1M each side
-  private readonly SPL_BASE_UNIT = 1e9;
-  private readonly USDC_BASE_UNIT = 1e6;
   constructor(
     private readonly databaseService: DatabaseService,
     @Inject(forwardRef(() => PriceService))
@@ -44,9 +44,10 @@ export class MarketService {
     await Promise.all(
       markets.map(async (market) => {
         // Calculate the new rate and velocity
-        const currentFundingRate = await this.getCurrentFundingRate(market);
-
-        const newFundingRateVelocity = await this.getCurrentVelocity(market);
+        const [currentFundingRate, newFundingRateVelocity] = await Promise.all([
+          this.getCurrentFundingRate(market),
+          this.getCurrentVelocity(market),
+        ]);
 
         // Update them in the database
         await this.databaseService.update<Market>(
@@ -63,6 +64,7 @@ export class MarketService {
 
   @Cron(CronExpression.EVERY_10_SECONDS)
   async shiftReserves(): Promise<void> {
+    return;
     // Shift the base reserve towards the oracle price
     // Do over a trajectory of 1 day, so shift by 1/8640
     // (86400 seconds in a day, called every 10 seconds)
@@ -98,14 +100,11 @@ export class MarketService {
      */
     const baseReserve = Math.round(
       Number(
-        multiply(
-          divide(this.INITIAL_RESERVE_BALANCE, initialPrice),
-          this.SPL_BASE_UNIT,
-        ),
+        multiply(divide(INITIAL_RESERVE_BALANCE, initialPrice), SPL_BASE_UNIT),
       ),
     ).toString();
     // Convert 1m USD to USDC by expanding units to base 6
-    const quoteReserve = multiply(baseReserve, this.USDC_BASE_UNIT);
+    const quoteReserve = multiply(baseReserve, USDC_BASE_UNIT);
     const k = multiply(baseReserve, quoteReserve);
 
     const [market] = await this.databaseService.insert<Market>('markets', {
@@ -173,15 +172,11 @@ export class MarketService {
     return updatedMarket;
   }
 
+  /**
+   * @dev No caching here --> always fetch fresh virtual AMM values.
+   */
   async getMarketById(marketId: string): Promise<Market> {
-    const cacheKey = `market:${marketId}`;
-    const cachedMarket = await this.cacheManager.get<Market>(cacheKey);
-
-    if (cachedMarket) {
-      return cachedMarket;
-    }
-
-    const [market] = await this.databaseService.select<Market>('markets', {
+    let [market] = await this.databaseService.select<Market>('markets', {
       eq: { id: marketId },
       limit: 1,
     });
@@ -190,7 +185,6 @@ export class MarketService {
       throw new NotFoundException(`Market ${marketId} not found`);
     }
 
-    await this.cacheManager.set(cacheKey, market, 60 * 60 * 1000); // 1 hour TTL
     return market;
   }
 
@@ -430,7 +424,7 @@ export class MarketService {
     // Get latest oracle price
     const [virtualPrice, oraclePrice] = await Promise.all([
       this.priceService.getVirtualPrice(market.id),
-      this.priceService.getOraclePrice(market.id),
+      this.priceService.getCurrentPrice(market.id),
     ]);
 
     // Calculate price difference percentage
@@ -491,8 +485,12 @@ export class MarketService {
     // Get current prices
     const [virtualPrice, oraclePrice] = await Promise.all([
       this.priceService.getVirtualPrice(market.id),
-      this.priceService.getOraclePrice(market.id),
+      this.priceService.getCurrentPrice(market.id),
     ]);
+
+    if (!virtualPrice || !oraclePrice) {
+      return '0';
+    }
 
     // Calculate price divergence as a percentage
     const priceDivergence = divide(

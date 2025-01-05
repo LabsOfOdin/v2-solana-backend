@@ -17,6 +17,11 @@ export class PriceController {
     return this.priceService.getCurrentPrice(marketId);
   }
 
+  @Get('virtual-price/:marketId')
+  async getVirtualPrice(@Param('marketId') marketId: string): Promise<string> {
+    return this.priceService.getVirtualPrice(marketId);
+  }
+
   @Get('sol')
   async getSolPrice(): Promise<number> {
     return await this.priceService.getSolPrice();

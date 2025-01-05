@@ -11,7 +11,7 @@ import { PriceModule } from 'src/price/price.module';
   imports: [
     DatabaseModule,
     ScheduleModule.forRoot(),
-    forwardRef(() => PriceModule),
+    PriceModule,
     forwardRef(() => TradeModule),
     StatsModule,
   ],
