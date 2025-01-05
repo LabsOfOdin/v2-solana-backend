@@ -166,6 +166,13 @@ export class LiquidationService {
     currentPrice: string,
   ): Promise<void> {
     try {
+      // Get market for updating open interest and reserves
+      const market = await this.marketService.getMarketById(position.marketId);
+      if (!market) {
+        throw new Error(`Market ${position.marketId} not found`);
+      }
+
+      // Update position status
       await this.databaseService.update<Position>(
         'positions',
         {
@@ -175,6 +182,26 @@ export class LiquidationService {
           realizedPnl: '0',
         },
         { id: position.id },
+      );
+
+      // Update market's open interest
+      await this.marketService.updateMarket(market.id, {
+        longOpenInterest:
+          position.side === OrderSide.LONG
+            ? subtract(market.longOpenInterest, position.size)
+            : market.longOpenInterest,
+        shortOpenInterest:
+          position.side === OrderSide.SHORT
+            ? subtract(market.shortOpenInterest, position.size)
+            : market.shortOpenInterest,
+      });
+
+      // Update virtual AMM reserves - treat liquidation like a position close
+      await this.marketService.updateVirtualReserves(
+        market.id,
+        position.side,
+        position.size,
+        true,
       );
 
       this.eventsService.emitPositionsUpdate(position.userId);

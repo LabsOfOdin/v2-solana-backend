@@ -79,6 +79,10 @@ export class PriceService {
    */
 
   async getCurrentPrice(marketId: string): Promise<string> {
+    return this.getVirtualPrice(marketId);
+  }
+
+  async getLivePrice(marketId: string): Promise<string> {
     const market = await this.getMarketById(marketId);
 
     const price = this.daoPrices.get(market.symbol.toUpperCase());
@@ -171,20 +175,20 @@ export class PriceService {
     let newBaseReserve: string;
     if (side === OrderSide.LONG) {
       if (isClosing) {
-        // Decrease the base reserve by the size in tokens
-        newBaseReserve = subtract(baseReserve, sizeInTokens);
-      } else {
-        // Increase the base reserve by the size in tokens
+        // When closing a long, we're selling base tokens back to the AMM
         newBaseReserve = add(baseReserve, sizeInTokens);
+      } else {
+        // When opening a long, we're buying base tokens from the AMM
+        newBaseReserve = subtract(baseReserve, sizeInTokens);
       }
     } else {
-      // Shorts are selling, so closing increases the base reserve
+      // For shorts
       if (isClosing) {
-        // Increase the base reserve by the size in tokens
-        newBaseReserve = add(baseReserve, sizeInTokens);
-      } else {
-        // Decrease the base reserve by the size in tokens
+        // When closing a short, we're buying base tokens from the AMM
         newBaseReserve = subtract(baseReserve, sizeInTokens);
+      } else {
+        // When opening a short, we're selling base tokens to the AMM
+        newBaseReserve = add(baseReserve, sizeInTokens);
       }
     }
 
@@ -646,20 +650,12 @@ export class PriceService {
       throw new NotFoundException(`Market ${marketId} not found`);
     }
 
-    console.log('Base reserve: ', market.virtualBaseReserve);
-    console.log('Quote reserve: ', market.virtualQuoteReserve);
-    console.log('K: ', market.virtualK);
-
     // Initialize virtual AMM values if they are null
     if (
       !market.virtualBaseReserve ||
       !market.virtualQuoteReserve ||
       !market.virtualK
     ) {
-      console.log(
-        'Initializing virtual AMM values for market (in price service)',
-        marketId,
-      );
       // Initialize virtual AMM values and update market variable
       market = await this.initializeVirtualAMM(market);
     }
@@ -683,8 +679,6 @@ export class PriceService {
 
     // Calculate K
     const k = multiply(baseReserve, quoteReserve);
-
-    console.log('Initializing amm with ', baseReserve, quoteReserve, k);
 
     // Update the market with initial virtual AMM values
     try {
