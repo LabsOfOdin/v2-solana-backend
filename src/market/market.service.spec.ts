@@ -59,7 +59,6 @@ describe('MarketService', () => {
           provide: PriceService,
           useValue: {
             getCurrentPrice: jest.fn(),
-            getOraclePrice: jest.fn(),
             getVirtualPrice: jest.fn(),
             getUsdcPrice: jest.fn(),
             updateVirtualPrice: jest.fn(),
@@ -281,7 +280,7 @@ describe('MarketService', () => {
     beforeEach(() => {
       databaseService.select.mockResolvedValue([mockMarket]);
       priceService.getVirtualPrice.mockResolvedValue('50000');
-      priceService.getOraclePrice.mockResolvedValue('49000');
+      priceService.getCurrentPrice.mockResolvedValue('49000');
     });
 
     it('should calculate funding rate based on price difference', async () => {
@@ -295,7 +294,7 @@ describe('MarketService', () => {
     beforeEach(() => {
       databaseService.select.mockResolvedValue([mockMarket]);
       priceService.getVirtualPrice.mockResolvedValue('50000');
-      priceService.getOraclePrice.mockResolvedValue('49000');
+      priceService.getCurrentPrice.mockResolvedValue('49000');
     });
 
     it('should update funding rates for all markets', async () => {
