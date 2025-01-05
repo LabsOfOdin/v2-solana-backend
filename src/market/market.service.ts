@@ -21,6 +21,7 @@ import { add, clamp, divide, multiply, subtract } from 'src/lib/math';
 import { TokenType } from 'src/types/token.types';
 import { SECONDS_IN_DAY } from 'src/common/config';
 import { OrderSide } from 'src/types/trade.types';
+import { SPL_BASE_UNIT } from 'src/common/constants';
 
 @Injectable()
 export class MarketService {
@@ -42,18 +43,29 @@ export class MarketService {
 
     await Promise.all(
       markets.map(async (market) => {
-        // Calculate new funding rate based on price difference
-        const newFundingRate = await this.calculateFundingRate(market);
+        // Calculate the new rate and velocity
+        const currentFundingRate = await this.getCurrentFundingRate(market);
 
+        const newFundingRateVelocity = await this.getCurrentVelocity(market);
+
+        // Update them in the database
         await this.databaseService.update<Market>(
           'markets',
           {
-            fundingRate: newFundingRate,
+            fundingRate: currentFundingRate,
+            fundingRateVelocity: newFundingRateVelocity,
           },
           { id: market.id },
         );
       }),
     );
+  }
+
+  @Cron(CronExpression.EVERY_10_SECONDS)
+  async shiftReserves(): Promise<void> {
+    // Shift the base reserve towards the oracle price
+    // Do over a trajectory of 1 day, so shift by 1/8640
+    // (86400 seconds in a day, called every 10 seconds)
   }
 
   /**
@@ -438,57 +450,125 @@ export class MarketService {
   }
 
   /**
-   * Update virtual AMM reserves after a trade
+   * @dev currentFundingRate = fundingRate + fundingRateVelocity * timeElapsed
+   */
+  private async getCurrentFundingRate(market: Market): Promise<string> {
+    const proportionalTimeElapsed = divide(
+      Date.now() - market.lastUpdatedTimestamp,
+      SECONDS_IN_DAY,
+    );
+
+    const currentFundingRate = add(
+      market.fundingRate,
+      multiply(market.fundingRateVelocity, proportionalTimeElapsed),
+    );
+
+    let clampedFundingRate = clamp(
+      currentFundingRate,
+      multiply(market.maxFundingRate, -1),
+      market.maxFundingRate,
+    );
+
+    return clampedFundingRate;
+  }
+
+  /**
+   * Calculates the funding rate velocity based on price divergence
+   *
+   * Formula:
+   * 1. Calculate price divergence percentage: (virtualPrice - oraclePrice) / oraclePrice
+   * 2. Apply dampening factor to prevent over-correction: divergence * dampening
+   * 3. Scale velocity based on max velocity parameter: scaledVelocity = dampened * maxVelocity
+   * 4. Clamp final velocity to prevent extreme changes
+   *
+   * Examples:
+   * - If virtual > oracle: Positive velocity to increase funding rate (penalize longs)
+   * - If virtual < oracle: Negative velocity to decrease funding rate (penalize shorts)
+   * - Magnitude increases with greater price divergence
+   * - Dampening prevents oscillation
+   */
+  private async getCurrentVelocity(market: Market): Promise<string> {
+    // Get current prices
+    const [virtualPrice, oraclePrice] = await Promise.all([
+      this.priceService.getVirtualPrice(market.id),
+      this.priceService.getOraclePrice(market.id),
+    ]);
+
+    // Calculate price divergence as a percentage
+    const priceDivergence = divide(
+      subtract(virtualPrice, oraclePrice),
+      oraclePrice,
+    );
+
+    // Apply dampening factor (10%) to prevent over-correction
+    const DAMPENING_FACTOR = '0.1';
+    const dampened = multiply(priceDivergence, DAMPENING_FACTOR);
+
+    // Scale by max velocity to get final velocity
+    const velocity = multiply(dampened, market.maxFundingVelocity);
+
+    return clamp(
+      velocity,
+      multiply(market.maxFundingVelocity, '-1'),
+      market.maxFundingVelocity,
+    );
+  }
+
+  /**
+   * @dev Update virtual AMM reserves after a trade
+   * - Open Long = buying an asset --> subtract from base reserve
+   * - Close Long = selling that asset back --> add to base reserve
+   * - Open Short = selling an asset --> add to base reserve
+   * - Close Short = buying that asset back --> subtract from base reserve
    */
   async updateVirtualReserves(
     marketId: string,
     side: OrderSide,
     size: string,
+    isClosing: boolean = false,
   ): Promise<void> {
+    // get base and quote
     const market = await this.getMarketById(marketId);
     const baseReserve = market.virtualBaseReserve; // base-9
-    const quoteReserve = market.virtualQuoteReserve; // base-6
 
+    // We only manipulate the base reserve
     let newBaseReserve: string;
-    let newQuoteReserve: string;
+
+    const currentPrice = await this.priceService.getVirtualPrice(marketId);
+
+    // Convert USD size to base reserve tokens
+    // sizeUsd / price --> expanded to base-9 and rounded to nearest integer
+    const sizeInTokens = Math.round(
+      parseFloat(multiply(divide(size, currentPrice), SPL_BASE_UNIT)),
+    );
 
     if (side === OrderSide.LONG) {
-      // Convert USD size to USDC base-6 units, accounting for USDC price
-      const usdcPrice = await this.priceService.getUsdcPrice();
-      const sizeInBaseUnits = multiply(
-        divide(size, usdcPrice),
-        this.USDC_BASE_UNIT,
-      );
-
-      const baseOut = divide(
-        multiply(sizeInBaseUnits, baseReserve),
-        quoteReserve,
-      );
-      newBaseReserve = subtract(baseReserve, baseOut);
-      newQuoteReserve = add(quoteReserve, sizeInBaseUnits);
+      if (isClosing) {
+        // Decrease the base reserve by the size in tokens
+        newBaseReserve = subtract(baseReserve, sizeInTokens);
+      } else {
+        // Increase the base reserve by the size in tokens
+        newBaseReserve = add(baseReserve, sizeInTokens);
+      }
     } else {
-      // For shorts: Convert USD size to base token units using token price
-      const tokenPrice = await this.priceService.getCurrentPrice(marketId);
-      const sizeInBaseUnits = multiply(
-        divide(size, tokenPrice),
-        this.SPL_BASE_UNIT,
-      ); // Convert to base-9
-
-      newBaseReserve = add(baseReserve, sizeInBaseUnits);
-      newQuoteReserve = divide(market.virtualK, newBaseReserve);
+      // Shorts are selling, so closing increases the base reserve
+      // Opening decreases the base reserve
+      if (isClosing) {
+        // Decrease the base reserve by the size in tokens
+        newBaseReserve = add(baseReserve, sizeInTokens);
+      } else {
+        // Increase the base reserve by the size in tokens
+        newBaseReserve = subtract(baseReserve, sizeInTokens);
+      }
     }
 
     await this.databaseService.update<Market>(
       'markets',
       {
         virtualBaseReserve: newBaseReserve,
-        virtualQuoteReserve: newQuoteReserve,
       },
       { id: marketId },
     );
-
-    // Update virtual price in PriceService
-    await this.priceService.updateVirtualPrice(marketId, side, size);
 
     await this.invalidateMarketCache();
   }
