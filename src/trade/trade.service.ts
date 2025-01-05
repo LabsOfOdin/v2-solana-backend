@@ -559,7 +559,7 @@ export class TradeService {
       // Update virtual AMM reserves
       await this.marketService.updateVirtualReserves(
         market.id,
-        position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
+        position.side,
         sizeDelta,
         true,
       );

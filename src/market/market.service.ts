@@ -538,25 +538,24 @@ export class MarketService {
     // sizeUsd / price --> expanded to base-9 and rounded to nearest integer
     const sizeInTokens = Math.round(
       parseFloat(multiply(divide(size, currentPrice), SPL_BASE_UNIT)),
-    );
+    ).toString();
 
     if (side === OrderSide.LONG) {
       if (isClosing) {
-        // Decrease the base reserve by the size in tokens
-        newBaseReserve = subtract(baseReserve, sizeInTokens);
-      } else {
-        // Increase the base reserve by the size in tokens
+        // When closing a long, we're selling base tokens back to the AMM
         newBaseReserve = add(baseReserve, sizeInTokens);
+      } else {
+        // When opening a long, we're buying base tokens from the AMM
+        newBaseReserve = subtract(baseReserve, sizeInTokens);
       }
     } else {
-      // Shorts are selling, so closing increases the base reserve
-      // Opening decreases the base reserve
+      // For shorts
       if (isClosing) {
-        // Decrease the base reserve by the size in tokens
-        newBaseReserve = add(baseReserve, sizeInTokens);
-      } else {
-        // Increase the base reserve by the size in tokens
+        // When closing a short, we're buying base tokens from the AMM
         newBaseReserve = subtract(baseReserve, sizeInTokens);
+      } else {
+        // When opening a short, we're selling base tokens to the AMM
+        newBaseReserve = add(baseReserve, sizeInTokens);
       }
     }
 
