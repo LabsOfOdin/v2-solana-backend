@@ -62,14 +62,6 @@ export class MarketService {
     );
   }
 
-  @Cron(CronExpression.EVERY_10_SECONDS)
-  async shiftReserves(): Promise<void> {
-    return;
-    // Shift the base reserve towards the oracle price
-    // Do over a trajectory of 1 day, so shift by 1/8640
-    // (86400 seconds in a day, called every 10 seconds)
-  }
-
   /**
    * @audit - Make vAMM model optional --> tokens with sufficient liq can avoid?
    */

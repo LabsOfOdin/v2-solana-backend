@@ -24,6 +24,7 @@ import {
   SPL_BASE_UNIT,
   USDC_BASE_UNIT,
 } from 'src/common/constants';
+import { Cron, CronExpression } from '@nestjs/schedule';
 
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
@@ -72,6 +73,70 @@ export class PriceService {
     this.connectDaoWebSocket();
     // Fetch initial prices
     this.fetchInitialPrices();
+  }
+
+  /**
+   * @dev Shifts the reserves of all markets to converge to the oracle price
+   */
+  @Cron(CronExpression.EVERY_10_SECONDS)
+  async shiftReserves(): Promise<void> {
+    try {
+      // Get all markets
+      const markets = await this.databaseService.select<Market>('markets', {});
+
+      await Promise.all(
+        markets.map(async (market) => {
+          // Get current prices
+          const [virtualPrice, oraclePrice] = await Promise.all([
+            this.getVirtualPrice(market.id),
+            this.getLivePrice(market.id),
+          ]);
+
+          // Calculate price difference as a percentage
+          const priceDiff = divide(
+            subtract(virtualPrice, oraclePrice),
+            oraclePrice,
+          );
+
+          // If price difference is less than 0.1%, don't adjust
+          if (Math.abs(Number(priceDiff)) < 0.001) {
+            return;
+          }
+
+          // Calculate adjustment factor (1/2880 = 0.000347)
+          // This means it takes 8 hours to fully converge
+          // (28800 seconds / 10 seconds per update = 2880 updates)
+          const ADJUSTMENT_FACTOR = '0.000347';
+
+          // Calculate how much to shift the base reserve
+          // If virtual price > oracle price: increase base reserve to lower price
+          // If virtual price < oracle price: decrease base reserve to raise price
+          const baseReserve = market.virtualBaseReserve;
+          const adjustment = multiply(
+            multiply(baseReserve, priceDiff),
+            ADJUSTMENT_FACTOR,
+          );
+
+          // Calculate new base reserve
+          const newBaseReserve = add(baseReserve, adjustment);
+
+          // Update market state
+          await this.databaseService.update<Market>(
+            'markets',
+            {
+              virtualBaseReserve: newBaseReserve,
+            },
+            { id: market.id },
+          );
+
+          // Clear price cache
+          this.virtualPrices.delete(market.id);
+          this.marketReserves.delete(market.id);
+        }),
+      );
+    } catch (error) {
+      console.error('Error in shiftReserves:', this.getErrorMessage(error));
+    }
   }
 
   /**
