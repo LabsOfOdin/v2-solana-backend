@@ -966,23 +966,6 @@ export class TradeService {
     }
   }
 
-  /**
-   * @audit Update for vAMM
-   */
-  private calculateSlippage(
-    size: string,
-    priceImpact: string,
-    positivelyImpacted: boolean,
-  ): string {
-    if (positivelyImpacted) {
-      // If impact was positively beneficial, the position did not experience any slippage
-      return '0';
-    }
-
-    // If negatively impacted, the slippage is the price impact percentage (price impact / size)
-    return divide(priceImpact, size);
-  }
-
   private calculateFee(size: string, collateralPrice: number): string {
     try {
       if (!size || !collateralPrice) {
