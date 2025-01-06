@@ -103,10 +103,10 @@ export class PriceService {
             return;
           }
 
-          // Calculate adjustment factor (1/2880 = 0.000347)
-          // This means it takes 8 hours to fully converge
-          // (28800 seconds / 10 seconds per update = 2880 updates)
-          const ADJUSTMENT_FACTOR = '0.000347';
+          // Calculate adjustment factor (1/360 ≈ 0.00278)
+          // This means it takes 1 hour to fully converge
+          // (3600 seconds / 10 seconds per update = 360 updates)
+          const ADJUSTMENT_FACTOR = '0.00278';
 
           // Calculate how much to shift the base reserve
           // If virtual price > oracle price: increase base reserve to lower price
