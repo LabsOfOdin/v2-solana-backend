@@ -149,6 +149,26 @@ export class DatabaseService {
   }
 
   /**
+   * Upsert data into a table
+   */
+  async upsert<T>(
+    table: string,
+    data: Partial<T>,
+    onConflict: string[],
+  ): Promise<T[]> {
+    const { data: result, error } = await this.supabase
+      .from(table)
+      .upsert(data, { onConflict: onConflict.join(',') })
+      .select();
+
+    if (error) {
+      throw error;
+    }
+
+    return result as T[];
+  }
+
+  /**
    * Update data in a table
    */
   async update<T>(

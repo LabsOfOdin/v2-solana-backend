@@ -1,10 +1,5 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import {
-  Inject,
-  Injectable,
-  NotFoundException,
-  forwardRef,
-} from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { RateLimiter } from 'limiter';
 import { Cache } from 'cache-manager';
 import * as WebSocket from 'ws';
@@ -25,6 +20,7 @@ import {
   USDC_BASE_UNIT,
 } from 'src/common/constants';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { OHLCV, Timeframe } from 'src/entities/ohlcv.entity';
 
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
@@ -43,8 +39,9 @@ export class PriceService {
 
   // Store virtual AMM prices in memory
   private virtualPrices: Map<string, string> = new Map();
-  // Store oracle prices in memory
-  private oraclePrices: Map<string, string> = new Map();
+
+  // Number of seconds to converge to the oracle price (4 HRS)
+  private CONVERGENCE_TRAJECTORY: number = 14400;
 
   // Rate limiter --> increase once updated to Metis v6 endpoint
   private solanaLimiter = new RateLimiter({
@@ -64,6 +61,16 @@ export class PriceService {
     { baseReserve: string; quoteReserve: string }
   > = new Map();
 
+  private readonly TIMEFRAME_MS = {
+    '1m': 60 * 1000,
+    '5m': 5 * 60 * 1000,
+    '15m': 15 * 60 * 1000,
+    '1h': 60 * 60 * 1000,
+    '4h': 4 * 60 * 60 * 1000,
+    '12h': 12 * 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000,
+  };
+
   constructor(
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
     private readonly databaseService: DatabaseService,
@@ -74,6 +81,11 @@ export class PriceService {
     // Fetch initial prices
     this.fetchInitialPrices();
   }
+
+  /**
+   * ========================== Cron Jobs ==========================
+   *
+   */
 
   /**
    * @dev Shifts the reserves of all markets to converge to the oracle price
@@ -103,10 +115,23 @@ export class PriceService {
             return;
           }
 
-          // Calculate adjustment factor (1/360 ≈ 0.00278)
-          // This means it takes 1 hour to fully converge
-          // (3600 seconds / 10 seconds per update = 360 updates)
-          const ADJUSTMENT_FACTOR = '0.00278';
+          /**
+           * The ratio the price should converge towards the oracle price each update.
+           *
+           * The trajectory is the total time it takes to converge, since we update every 10 seconds,
+           * we divide the trajectory by 10 to get the number of updates it takes to converge.
+           *
+           * For example, if the trajectory is 3600 seconds, it will take 360 updates to converge.
+           *
+           * To get the adjustment factor, we divide 1 by the number of updates it takes to converge,
+           * to get the convergence for each individual period.
+           *
+           * E.g 1/360 = 0.00278
+           */
+          const ADJUSTMENT_FACTOR = divide(
+            '1',
+            divide(this.CONVERGENCE_TRAJECTORY, 10),
+          );
 
           // Calculate how much to shift the base reserve
           // If virtual price > oracle price: increase base reserve to lower price
@@ -136,6 +161,75 @@ export class PriceService {
       );
     } catch (error) {
       console.error('Error in shiftReserves:', this.getErrorMessage(error));
+    }
+  }
+
+  /**
+   * Update OHLCV data for all markets and timeframes
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async updateOHLCV(): Promise<void> {
+    try {
+      const markets = await this.databaseService.select<Market>('markets', {});
+      const currentTime = Date.now();
+
+      await Promise.all(
+        markets.map(async (market) => {
+          // Get current price
+          const price = await this.getCurrentPrice(market.id);
+
+          // Process each timeframe
+          await Promise.all(
+            Object.entries(this.TIMEFRAME_MS).map(async ([timeframe, ms]) => {
+              // Round down timestamp to the nearest interval
+              const timestamp = Math.floor(currentTime / ms) * ms;
+
+              // Get existing candle for this period if it exists
+              const [existingCandle] = await this.databaseService.select<OHLCV>(
+                'ohlcv_data',
+                {
+                  eq: {
+                    marketId: market.id,
+                    timeframe,
+                    timestamp,
+                  },
+                  limit: 1,
+                },
+              );
+
+              if (existingCandle) {
+                // Update existing candle
+                await this.storeOHLCV(market.id, timeframe, {
+                  timestamp,
+                  open: existingCandle.open,
+                  high: Math.max(
+                    Number(existingCandle.high),
+                    Number(price),
+                  ).toString(),
+                  low: Math.min(
+                    Number(existingCandle.low),
+                    Number(price),
+                  ).toString(),
+                  close: price,
+                  volume: existingCandle.volume, // Update volume if you have volume data
+                });
+              } else {
+                // Create new candle
+                await this.storeOHLCV(market.id, timeframe, {
+                  timestamp,
+                  open: price,
+                  high: price,
+                  low: price,
+                  close: price,
+                  volume: '0', // Update with actual volume if available
+                });
+              }
+            }),
+          );
+        }),
+      );
+    } catch (error) {
+      console.error('Error updating OHLCV:', this.getErrorMessage(error));
     }
   }
 
@@ -311,87 +405,74 @@ export class PriceService {
    * ========================== Candlestick Methods ==========================
    */
 
-  async fetchGeckoTerminalOHLCV(
-    network: string,
-    poolAddress: string,
+  /**
+   * Store OHLCV data for a market
+   */
+  private async storeOHLCV(
+    marketId: string,
     timeframe: string,
-    aggregate: string,
-    beforeTimestamp?: number,
-    limit: number = 1000,
-    currency: string = 'usd',
-    token: string = 'base',
-  ): Promise<any> {
-    const cacheKey = `geckoterminal-${network}-${poolAddress}-${timeframe}-${aggregate}-${beforeTimestamp}-${limit}-${currency}-${token}`;
-
-    // Check if the data is in the cache
-    const cachedData = await this.cacheManager.get(cacheKey);
-    if (cachedData) {
-      return cachedData;
-    }
-
-    const baseUrl = 'https://api.geckoterminal.com/api/v2';
-
-    const params = new URLSearchParams({
-      aggregate,
-      limit: limit.toString(),
-      currency,
-      token,
-    });
-
-    if (beforeTimestamp) {
-      params.append('before_timestamp', beforeTimestamp.toString());
-    }
-
-    let mappedTimeframe = 'day';
-
-    // Map timeframe from CryptoCompare equivalents to GeckoTerminal
-    if (timeframe === 'histominute') {
-      mappedTimeframe = 'minute';
-    } else if (timeframe === 'histohour') {
-      mappedTimeframe = 'hour';
-    } else if (timeframe === 'histoday') {
-      mappedTimeframe = 'day';
-    } else {
-      mappedTimeframe = 'minute';
-    }
-
-    const url = `${baseUrl}/networks/${network}/pools/${poolAddress}/ohlcv/${mappedTimeframe}?${params}`;
-
-    // Apply rate limiting
-    await this.geckoTerminalLimiter.removeTokens(1);
-
+    data: {
+      timestamp: number;
+      open: string;
+      high: string;
+      low: string;
+      close: string;
+      volume: string;
+    },
+  ): Promise<void> {
     try {
-      const response = await fetch(url, {
-        headers: {
-          Accept: 'application/json;version=20230302',
+      await this.databaseService.upsert<OHLCV>(
+        'ohlcv_data',
+        {
+          marketId,
+          timeframe,
+          timestamp: data.timestamp,
+          open: data.open,
+          high: data.high,
+          low: data.low,
+          close: data.close,
+          volume: data.volume,
         },
-      });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `HTTP error! status: ${response.status}, body: ${errorBody}`,
-        );
-      }
-
-      const data = await response.json();
-
-      // Cache the result for 5 minutes
-      await this.cacheManager.set(cacheKey, data, 300_000); // 300000 ms = 5 minutes
-      return data;
+        ['marketId', 'timeframe', 'timestamp'],
+      );
     } catch (error) {
-      console.error('Error fetching data from GeckoTerminal:', {
-        error: error instanceof Error ? error.message : String(error),
-        url,
-        network,
-        poolAddress,
-        timeframe,
-        aggregate,
-        beforeTimestamp,
+      console.error('Error storing OHLCV:', this.getErrorMessage(error));
+      throw error;
+    }
+  }
+
+  /**
+   * Get OHLCV data for a market
+   */
+  async getOHLCV(
+    marketId: string,
+    timeframe: string,
+    startTime: number,
+    endTime: number | null,
+    limit: number = 1000,
+  ): Promise<OHLCV[]> {
+    try {
+      const candles = await this.databaseService.select<OHLCV>('ohlcv_data', {
+        eq: {
+          marketId,
+          timeframe,
+        },
+        gte: {
+          timestamp: startTime,
+        },
+        lte: {
+          timestamp: endTime ? endTime : Date.now(),
+        },
+        order: {
+          column: 'timestamp',
+          ascending: true,
+        },
         limit,
-        currency,
-        token,
       });
+
+      return candles;
+    } catch (error) {
+      console.error('Error fetching OHLCV:', this.getErrorMessage(error));
       throw error;
     }
   }

@@ -32,27 +32,21 @@ export class PriceController {
     return await this.priceService.getUsdcPrice();
   }
 
-  @Get('geckoterminal-ohlcv')
-  async getGeckoTerminalOHLCV(
-    @Query('network') network: string,
-    @Query('poolAddress') poolAddress: string,
+  @Get('ohlcv')
+  async getOHLCV(
+    @Query('marketId') marketId: string,
     @Query('timeframe') timeframe: string,
-    @Query('aggregate') aggregate: string,
-    @Query('beforeTimestamp') beforeTimestamp?: number,
+    @Query('startTime') startTime: number,
+    @Query('endTime') endTime: number,
     @Query('limit') limit?: number,
-    @Query('currency') currency?: string,
-    @Query('token') token?: string,
   ) {
     try {
-      return this.priceService.fetchGeckoTerminalOHLCV(
-        network,
-        poolAddress,
+      return this.priceService.getOHLCV(
+        marketId,
         timeframe,
-        aggregate,
-        beforeTimestamp,
+        startTime,
+        endTime,
         limit,
-        currency,
-        token,
       );
     } catch (error) {
       throw new NotFoundException('Params Error');

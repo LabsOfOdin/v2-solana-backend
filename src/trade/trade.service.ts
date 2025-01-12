@@ -83,6 +83,7 @@ export class TradeService {
               position.id,
               position.userId,
               position.size,
+              '100', // Set max slippage to 100%
             );
           }
         } catch (error) {
@@ -102,6 +103,7 @@ export class TradeService {
               position.id,
               position.userId,
               position.size,
+              '100', // Set max slippage to 100%
             );
           }
         } catch (error) {
@@ -350,6 +352,7 @@ export class TradeService {
     positionId: string,
     userId: string,
     sizeDelta: string,
+    maxSlippage: string,
   ): Promise<Position> {
     try {
       // PART 1: Validations and Data Gathering
@@ -387,12 +390,18 @@ export class TradeService {
       // -------------------------------------
 
       // 5. Calculate all necessary values
-      // @audit add max slippage
-      const { executionPrice } = await this.priceService.previewPrice(
-        position.marketId,
-        position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
-        sizeDelta,
-      );
+      const { executionPrice, priceImpact } =
+        await this.priceService.previewPrice(
+          position.marketId,
+          position.side === OrderSide.LONG ? OrderSide.SHORT : OrderSide.LONG,
+          sizeDelta,
+          true,
+        );
+
+      const slippagePercentage = abs(priceImpact);
+      if (compare(slippagePercentage, maxSlippage) > 0) {
+        throw new BadRequestException('Slippage exceeds maximum allowed');
+      }
 
       const remainingSize = subtract(position.size, sizeDelta);
 
@@ -401,6 +410,11 @@ export class TradeService {
       const solPrice = await this.priceService.getSolPrice();
 
       const closeProportion = divide(sizeDelta, position.size);
+
+      const fee = this.calculateFee(
+        sizeDelta,
+        position.token === TokenType.SOL ? solPrice : 1,
+      );
 
       const solMarginToRelease = multiply(
         position.lockedMarginSOL,
@@ -438,10 +452,7 @@ export class TradeService {
         price: executionPrice,
         leverage: position.leverage,
         realizedPnl: realizedPnlUSD,
-        fee: this.calculateFee(
-          sizeDelta,
-          position.token === TokenType.SOL ? solPrice : 1,
-        ),
+        fee: fee,
         createdAt: new Date(),
       };
 
@@ -515,7 +526,14 @@ export class TradeService {
         }
       }
 
-      // 2. Update position
+      // 2. Deduct fee from user's margin balance
+      await this.marginService.deductMargin(
+        position.userId,
+        position.token,
+        fee,
+      );
+
+      // 3. Update position
       const [updatedPosition] = await this.databaseService.update(
         'positions',
         isFullClose
