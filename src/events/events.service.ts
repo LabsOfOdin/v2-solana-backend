@@ -55,7 +55,6 @@ export class EventsService {
 
   emitBorrowingFeeCharged(event: BorrowingFeeEvent): void {
     // In production, this would emit the event to a message queue or websocket
-    console.log('Borrowing fee charged:', event);
   }
 
   emitBalancesUpdate(userId: string) {
@@ -67,6 +66,5 @@ export class EventsService {
 
   emitFundingFeeCharged(event: FundingFeeEvent): void {
     // In production, this would emit the event to a message queue or websocket
-    console.log('Funding fee charged:', event);
   }
 }

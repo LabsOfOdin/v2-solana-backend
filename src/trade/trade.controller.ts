@@ -58,13 +58,14 @@ export class TradeController {
   @Post('position/:positionId/close')
   async closePosition(
     @Param('positionId') positionId: string,
-    @Body() request: { sizeDelta: string },
+    @Body() request: { sizeDelta: string; maxSlippage: string },
     @Query('publicKey') publicKey: string,
   ) {
     return this.tradeService.closePosition(
       positionId,
       publicKey,
       request.sizeDelta,
+      request.maxSlippage,
     );
   }
 
