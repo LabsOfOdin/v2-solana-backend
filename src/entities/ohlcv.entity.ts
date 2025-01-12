@@ -9,7 +9,6 @@ export enum Timeframe {
 }
 
 export interface OHLCV {
-  id: string;
   marketId: string;
   timeframe: string;
   timestamp: number;
