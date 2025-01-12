@@ -467,7 +467,16 @@ export class PriceService {
     endTime?: number | null,
     limit: number = 1000,
   ): Promise<OHLCV[]> {
+    const cacheKey = `getOHLCV:${marketId}:${timeframe}:${startTime || 'defaultStartTime'}:${endTime || 'currentTime'}:${limit}`;
+    const CACHE_TTL = 60_000; // 1 minute
+
     try {
+      // Attempt to retrieve cached data
+      const cachedData = await this.cacheManager.get<OHLCV[]>(cacheKey);
+      if (cachedData) {
+        return cachedData;
+      }
+
       const currentTime = Date.now();
       // If no start time provided, calculate default based on timeframe
       const defaultStartTime = this.calculateDefaultStartTime(timeframe, limit);
@@ -496,6 +505,9 @@ export class PriceService {
         },
         limit,
       });
+
+      // Store the fetched data in cache
+      await this.cacheManager.set(cacheKey, candles, CACHE_TTL); // 5 minutes
 
       return candles;
     } catch (error) {
@@ -854,6 +866,65 @@ export class PriceService {
     }
 
     return market;
+  }
+
+  /**
+   * Get 24-hour statistics for a given market
+   * @param marketId The ID of the market
+   * @returns An object containing the 24hr change, high, and low
+   */
+  async get24hrStats(
+    marketId: string,
+  ): Promise<{ change: number; high: string; low: string }> {
+    const TIMEFRAME = '1m'; // 1-minute intervals for detailed data
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+
+    try {
+      // Fetch OHLCV data for the last 24 hours
+      const ohlcvData = await this.getOHLCV(
+        marketId,
+        TIMEFRAME,
+        oneDayAgo,
+        now,
+        1440,
+      ); // 1440 minutes in a day
+
+      if (ohlcvData.length === 0) {
+        throw new Error('No OHLCV data available for the past 24 hours');
+      }
+
+      // Calculate 24hr change
+      const openingPrice = parseFloat(ohlcvData[0].open);
+      const closingPrice = parseFloat(ohlcvData[ohlcvData.length - 1].close);
+      const change = (closingPrice - openingPrice) / openingPrice;
+
+      // Determine 24hr high and low
+      let high = parseFloat(ohlcvData[0].high);
+      let low = parseFloat(ohlcvData[0].low);
+
+      for (const candle of ohlcvData) {
+        const highPrice = parseFloat(candle.high);
+        const lowPrice = parseFloat(candle.low);
+
+        if (highPrice > high) {
+          high = highPrice;
+        }
+
+        if (lowPrice < low) {
+          low = lowPrice;
+        }
+      }
+
+      return {
+        change: parseFloat(change.toFixed(5)), // e.g., -0.05000 for -5%
+        high: high.toFixed(2),
+        low: low.toFixed(2),
+      };
+    } catch (error) {
+      console.error('Error in get24hrStats:', this.getErrorMessage(error));
+      throw error;
+    }
   }
 
   private async initializeVirtualAMM(market: Market): Promise<Market> {

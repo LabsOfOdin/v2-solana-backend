@@ -69,4 +69,22 @@ export class PriceController {
       );
     }
   }
+
+  /**
+   * Get 24-hour price statistics for a specific market
+   * @param marketId The ID of the market
+   * @returns An object containing the 24hr change, high, and low
+   */
+  @Get('market/:marketId/24hr')
+  async get24hrStats(
+    @Param('marketId') marketId: string,
+  ): Promise<{ change: number; high: string; low: string }> {
+    try {
+      return await this.priceService.get24hrStats(marketId);
+    } catch (error) {
+      throw new NotFoundException(
+        `Unable to retrieve 24hr stats for marketId: ${marketId}`,
+      );
+    }
+  }
 }
