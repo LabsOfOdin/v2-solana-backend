@@ -20,7 +20,7 @@ import {
   USDC_BASE_UNIT,
 } from 'src/common/constants';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { OHLCV, Timeframe } from 'src/entities/ohlcv.entity';
+import { OHLCV } from 'src/entities/ohlcv.entity';
 
 /**
  * This service will be responsible for fetching prices for all assets within the protocol. We'll probably use
@@ -167,7 +167,7 @@ export class PriceService {
   /**
    * Update OHLCV data for all markets and timeframes
    */
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_10_SECONDS)
   async updateOHLCV(): Promise<void> {
     try {
       const markets = await this.databaseService.select<Market>('markets', {});
@@ -421,22 +421,38 @@ export class PriceService {
     },
   ): Promise<void> {
     try {
-      await this.databaseService.upsert<OHLCV>(
-        'ohlcv_data',
-        {
+      // Validate timestamp
+      if (!data.timestamp || data.timestamp <= 0) {
+        throw new Error('Invalid timestamp');
+      }
+
+      const ohlcvData = {
+        marketId,
+        timeframe,
+        timestamp: data.timestamp, // Store directly as number
+        open: data.open,
+        high: data.high,
+        low: data.low,
+        close: data.close,
+        volume: data.volume,
+      };
+
+      await this.databaseService.upsert<OHLCV>('ohlcv_data', ohlcvData, [
+        'marketId',
+        'timeframe',
+        'timestamp',
+      ]);
+    } catch (error) {
+      console.error('Error storing OHLCV:', {
+        error,
+        errorMessage: this.getErrorMessage(error),
+        data: {
           marketId,
           timeframe,
           timestamp: data.timestamp,
-          open: data.open,
-          high: data.high,
-          low: data.low,
-          close: data.close,
-          volume: data.volume,
         },
-        ['marketId', 'timeframe', 'timestamp'],
-      );
-    } catch (error) {
-      console.error('Error storing OHLCV:', this.getErrorMessage(error));
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       throw error;
     }
   }
@@ -447,21 +463,32 @@ export class PriceService {
   async getOHLCV(
     marketId: string,
     timeframe: string,
-    startTime: number,
-    endTime: number | null,
+    startTime?: number,
+    endTime?: number | null,
     limit: number = 1000,
   ): Promise<OHLCV[]> {
     try {
+      const currentTime = Date.now();
+      // If no start time provided, calculate default based on timeframe
+      const defaultStartTime = this.calculateDefaultStartTime(timeframe, limit);
+      const validStartTime =
+        startTime && startTime > 0 ? startTime : defaultStartTime;
+      const validEndTime = endTime && endTime > 0 ? endTime : currentTime;
+
+      if (validEndTime <= validStartTime) {
+        throw new Error('End time must be greater than start time');
+      }
+
       const candles = await this.databaseService.select<OHLCV>('ohlcv_data', {
         eq: {
           marketId,
           timeframe,
         },
         gte: {
-          timestamp: startTime,
+          timestamp: validStartTime,
         },
         lte: {
-          timestamp: endTime ? endTime : Date.now(),
+          timestamp: validEndTime,
         },
         order: {
           column: 'timestamp',
@@ -475,6 +502,24 @@ export class PriceService {
       console.error('Error fetching OHLCV:', this.getErrorMessage(error));
       throw error;
     }
+  }
+
+  /**
+   * Calculate the default start time for OHLCV data based on timeframe
+   * @param timeframe The timeframe (e.g., '1m', '5m', '1h')
+   * @param limit Number of candles to fetch
+   * @returns Default start time in milliseconds
+   */
+  private calculateDefaultStartTime(timeframe: string, limit: number): number {
+    const currentTime = Date.now();
+    const timeframeMs = this.TIMEFRAME_MS[timeframe];
+
+    if (!timeframeMs) {
+      throw new Error(`Invalid timeframe: ${timeframe}`);
+    }
+
+    // Calculate start time by going back (limit) intervals
+    return currentTime - timeframeMs * limit;
   }
 
   /**
@@ -744,9 +789,11 @@ export class PriceService {
 
   private getErrorMessage(error: unknown): string {
     if (error instanceof Error) {
-      return error.message;
+      return `${error.name}: ${error.message}${error.stack ? `\n${error.stack}` : ''}`;
     } else if (typeof error === 'string') {
       return error;
+    } else if (error && typeof error === 'object' && 'message' in error) {
+      return String(error.message);
     } else {
       return 'An unknown error occurred';
     }
